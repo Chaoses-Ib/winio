@@ -6,8 +6,9 @@ use std::{
 use widestring::U16CString;
 use windows_sys::Win32::UI::{
     Controls::{
-        TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_DELTOOLW,
-        TTM_SETMAXTIPWIDTH, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
+        TOOLTIPS_CLASSW, TTDT_AUTOPOP, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_DELTOOLW,
+        TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP, TTS_NOPREFIX,
+        TTTOOLINFOW,
     },
     WindowsAndMessaging::{DestroyWindow, GetParent, GetSystemMetrics, SM_CXMAXTRACK, WS_POPUP},
 };
@@ -36,6 +37,9 @@ impl<T: AsWidget> ToolTip<T> {
         // -1 doesn't work, we use SM_CXMAXTRACK like WinForms does
         let max_width = unsafe { GetSystemMetrics(SM_CXMAXTRACK) };
         handle.send_message(TTM_SETMAXTIPWIDTH, 0, max_width as isize);
+
+        // Keep pop-up
+        handle.send_message(TTM_SETDELAYTIME, TTDT_AUTOPOP as usize, 0x7FFF);
 
         let mut info: TTTOOLINFOW = unsafe { std::mem::zeroed() };
         info.cbSize = std::mem::size_of::<TTTOOLINFOW>() as _;
