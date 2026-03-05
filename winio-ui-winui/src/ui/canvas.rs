@@ -1,18 +1,18 @@
 use std::{cell::Cell, mem::ManuallyDrop, ptr::null_mut, rc::Rc};
 
+use compio_log::error;
 use image::DynamicImage;
 use inherit_methods_macro::inherit_methods;
 use send_wrapper::SendWrapper;
 use windows::{
     Win32::{
-        Foundation::{D2DERR_RECREATE_TARGET, HMODULE},
+        Foundation::{D2DERR_RECREATE_TARGET, E_POINTER, HMODULE},
         Graphics::{
             Direct2D::{
                 Common::{D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT},
                 D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
-                D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-                D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext,
-                ID2D1Factory2,
+                D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, ID2D1Bitmap1,
+                ID2D1Device, ID2D1DeviceContext, ID2D1Factory2,
             },
             Direct3D::{
                 D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_9_1, D3D_FEATURE_LEVEL_9_2,
@@ -35,12 +35,11 @@ use windows::{
             },
         },
     },
-    core::{BOOL, Interface, Result},
+    core::{BOOL, Interface},
 };
 use winio_callback::Callback;
-use winio_handle::AsWindow;
-use winio_primitive::{DrawingFont, MouseButton, Point, Rect, Size, Vector};
-use winio_ui_windows_common::is_dark_mode_allowed_for_app;
+use winio_handle::AsContainer;
+use winio_primitive::{ColorTheme, DrawingFont, MouseButton, Point, Rect, Size, Transform, Vector};
 pub use winio_ui_windows_common::{Brush, DrawingImage, DrawingPath, DrawingPathBuilder, Pen};
 use winui3::{
     ISwapChainPanelNative,
@@ -53,15 +52,17 @@ use winui3::{
     },
 };
 
-use crate::{GlobalRuntime, RUNTIME, Widget, ui::Convertible};
+use crate::{
+    Error, GlobalRuntime, RUNTIME, Result, Widget, color_theme, get_root_window, ui::Convertible,
+};
 
 #[inline]
-fn d2d1<T>(f: impl FnOnce(&ID2D1Factory2) -> T) -> T {
-    RUNTIME.with(|runtime| f(runtime.d2d1()))
+fn d2d1<T>(f: impl FnOnce(&ID2D1Factory2) -> Result<T>) -> Result<T> {
+    RUNTIME.with(|runtime| f(runtime.d2d1()?))
 }
 
 #[inline]
-fn is_lost(e: &windows::core::Error) -> bool {
+fn is_lost(e: &Error) -> bool {
     matches!(
         e.code(),
         D2DERR_RECREATE_TARGET | DXGI_ERROR_DEVICE_REMOVED | DXGI_ERROR_DEVICE_RESET
@@ -80,7 +81,7 @@ struct SwapChain {
 }
 
 impl SwapChain {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self> {
         unsafe {
             let mut device = None;
             let mut context = None;
@@ -102,16 +103,13 @@ impl SwapChain {
                 Some(&mut device),
                 None,
                 Some(&mut context),
-            )
-            .unwrap();
-            let d3d11_device = device.unwrap();
-            let dxdi_device = d3d11_device.cast::<IDXGIDevice1>().unwrap();
-            let d3d11_context = context.unwrap();
+            )?;
+            let d3d11_device = device.ok_or(Error::from_hresult(E_POINTER))?;
+            let dxdi_device = d3d11_device.cast::<IDXGIDevice1>()?;
+            let d3d11_context = context.ok_or(Error::from_hresult(E_POINTER))?;
             let d2d1_device: ID2D1Device =
-                d2d1(|d2d1| d2d1.CreateDevice(&dxdi_device).unwrap().into());
-            let d2d1_context = d2d1_device
-                .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
-                .unwrap();
+                d2d1(|d2d1| Ok(d2d1.CreateDevice(&dxdi_device)?.into()))?;
+            let d2d1_context = d2d1_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
             let desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: 100,
                 Height: 100,
@@ -128,31 +126,36 @@ impl SwapChain {
                 AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
                 Flags: 0,
             };
-            let adapter = dxdi_device.GetAdapter().unwrap();
-            let factory = adapter.GetParent::<IDXGIFactory2>().unwrap();
-            let swap_chain = factory
-                .CreateSwapChainForComposition(&dxdi_device, &desc, None)
-                .unwrap();
-            dxdi_device.SetMaximumFrameLatency(1).unwrap();
-            Self {
+            let adapter = dxdi_device.GetAdapter()?;
+            let factory = adapter.GetParent::<IDXGIFactory2>()?;
+            let swap_chain = factory.CreateSwapChainForComposition(&dxdi_device, &desc, None)?;
+            dxdi_device.SetMaximumFrameLatency(1)?;
+            Ok(Self {
                 d3d11_device,
                 d3d11_context,
                 d2d1_device,
                 d2d1_context,
                 bitmap: None,
                 swap_chain,
-            }
+            })
         }
     }
 
-    pub fn set_to_panel(&self, panel: &SwapChainPanel) {
-        let native = panel.cast::<ISwapChainPanelNative>().unwrap();
+    pub fn set_to_panel(&self, panel: &SwapChainPanel) -> Result<()> {
+        let native = panel.cast::<ISwapChainPanelNative>()?;
         unsafe {
-            native.SetSwapChain(&self.swap_chain).unwrap();
+            native.SetSwapChain(&self.swap_chain)?;
         }
+        Ok(())
     }
 
-    pub fn begin_draw(&mut self, size: Size, scalex: f32, scaley: f32) -> Result<()> {
+    pub fn begin_draw(
+        &mut self,
+        panel: &SwapChainPanel,
+        size: Size,
+        scalex: f32,
+        scaley: f32,
+    ) -> Result<()> {
         const DPI: f32 = 96.0;
 
         let context = &self.d2d1_context;
@@ -190,24 +193,29 @@ impl SwapChain {
             let bitmap = context.CreateBitmapFromDxgiSurface(&buffer, Some(&props))?;
             context.SetTarget(&bitmap);
             context.SetDpi(DPI * scalex, DPI * scaley);
-            context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
             self.bitmap = Some(bitmap);
             context.BeginDraw();
-            context.Clear(Some(&if is_dark_mode_allowed_for_app() {
-                D2D1_COLOR_F {
+            let has_backdrop = get_root_window(&panel.cast()?)
+                .map(|w| w.SystemBackdrop().is_ok())
+                .unwrap_or_default();
+            let clear_color = if has_backdrop {
+                None
+            } else if matches!(color_theme()?, ColorTheme::Dark) {
+                Some(D2D1_COLOR_F {
                     r: 0.0,
                     g: 0.0,
                     b: 0.0,
                     a: 1.0,
-                }
+                })
             } else {
-                D2D1_COLOR_F {
+                Some(D2D1_COLOR_F {
                     r: 1.0,
                     g: 1.0,
                     b: 1.0,
                     a: 1.0,
-                }
-            }));
+                })
+            };
+            context.Clear(clear_color.as_ref().map(|c| c as *const _));
         }
         Ok(())
     }
@@ -235,137 +243,130 @@ pub struct Canvas {
 
 #[inherit_methods(from = "self.handle")]
 impl Canvas {
-    pub fn new(parent: impl AsWindow) -> Self {
-        let dwrite = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).unwrap() };
-        let panel = MUXC::SwapChainPanel::new().unwrap();
-        let swap_chain = SwapChain::new();
-        swap_chain.set_to_panel(&panel);
+    pub fn new(parent: impl AsContainer) -> Result<Self> {
+        let dwrite = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+        let panel = MUXC::SwapChainPanel::new()?;
+        let swap_chain = SwapChain::new()?;
+        swap_chain.set_to_panel(&panel)?;
 
         let mouse_button_cache = SendWrapper::new(Rc::new(Cell::new(MouseButton::Other)));
         let on_press = SendWrapper::new(Rc::new(Callback::new()));
         {
             let on_press = on_press.clone();
             let mouse_button_cache = mouse_button_cache.clone();
-            panel
-                .PointerPressed(&PointerEventHandler::new(move |sender, args| {
-                    if let Some(args) = args.as_ref() {
-                        if let Some(panel) = sender
-                            .as_ref()
-                            .and_then(|sender| sender.cast::<SwapChainPanel>().ok())
-                        {
-                            let mouse = mouse_button(&panel, args)?;
-                            mouse_button_cache.set(mouse);
-                            on_press.signal::<GlobalRuntime>(mouse);
-                        }
-                    }
-                    Ok(())
-                }))
-                .unwrap();
+            panel.PointerPressed(&PointerEventHandler::new(move |sender, args| {
+                if let Some(args) = args.as_ref()
+                    && let Some(panel) = sender
+                        .as_ref()
+                        .and_then(|sender| sender.cast::<SwapChainPanel>().ok())
+                {
+                    let mouse = mouse_button(&panel, args)?;
+                    mouse_button_cache.set(mouse);
+                    on_press.signal::<GlobalRuntime>(mouse);
+                }
+                Ok(())
+            }))?;
         }
         let on_release = SendWrapper::new(Rc::new(Callback::new()));
         {
             let on_release = on_release.clone();
             let mouse_button_cache = mouse_button_cache.clone();
-            panel
-                .PointerReleased(&PointerEventHandler::new(move |_, _| {
-                    let mouse = mouse_button_cache.get();
-                    on_release.signal::<GlobalRuntime>(mouse);
-                    mouse_button_cache.set(MouseButton::Other);
-                    Ok(())
-                }))
-                .unwrap();
+            panel.PointerReleased(&PointerEventHandler::new(move |_, _| {
+                let mouse = mouse_button_cache.get();
+                on_release.signal::<GlobalRuntime>(mouse);
+                mouse_button_cache.set(MouseButton::Other);
+                Ok(())
+            }))?;
         }
         let on_move = SendWrapper::new(Rc::new(Callback::new()));
         {
             let on_move = on_move.clone();
-            panel
-                .PointerMoved(&PointerEventHandler::new(move |sender, args| {
-                    if let Some(args) = args.as_ref() {
-                        if let Some(panel) = sender
-                            .as_ref()
-                            .and_then(|sender| sender.cast::<SwapChainPanel>().ok())
-                        {
-                            let point = args.GetCurrentPoint(&panel)?;
-                            on_move.signal::<GlobalRuntime>(Point::from_native(point.Position()?));
-                        }
-                    }
-                    Ok(())
-                }))
-                .unwrap();
+            panel.PointerMoved(&PointerEventHandler::new(move |sender, args| {
+                if let Some(args) = args.as_ref()
+                    && let Some(panel) = sender
+                        .as_ref()
+                        .and_then(|sender| sender.cast::<SwapChainPanel>().ok())
+                {
+                    let point = args.GetCurrentPoint(&panel)?;
+                    on_move.signal::<GlobalRuntime>(Point::from_native(point.Position()?));
+                }
+                Ok(())
+            }))?;
         }
         let on_wheel = SendWrapper::new(Rc::new(Callback::new()));
         {
             let on_wheel = on_wheel.clone();
-            panel
-                .PointerWheelChanged(&PointerEventHandler::new(move |sender, args| {
-                    if let Some(args) = args.as_ref() {
-                        if let Some(panel) = sender
-                            .as_ref()
-                            .and_then(|sender| sender.cast::<SwapChainPanel>().ok())
-                        {
-                            let point = args.GetCurrentPoint(&panel)?;
-                            let props = point.Properties()?;
-                            let delta = props.MouseWheelDelta()?;
-                            let orient = props.Orientation()? / 180.0 * std::f32::consts::PI;
-                            let deltay = orient.cos() as f64 * delta as f64;
-                            let deltax = -orient.sin() as f64 * delta as f64;
-                            on_wheel.signal::<GlobalRuntime>(Vector::new(deltax, deltay));
-                        }
-                    }
-                    Ok(())
-                }))
-                .unwrap();
+            panel.PointerWheelChanged(&PointerEventHandler::new(move |sender, args| {
+                if let Some(args) = args.as_ref()
+                    && let Some(panel) = sender
+                        .as_ref()
+                        .and_then(|sender| sender.cast::<SwapChainPanel>().ok())
+                {
+                    let point = args.GetCurrentPoint(&panel)?;
+                    let props = point.Properties()?;
+                    let delta = props.MouseWheelDelta()?;
+                    let orient = props.Orientation()? / 180.0 * std::f32::consts::PI;
+                    let deltay = orient.cos() as f64 * delta as f64;
+                    let deltax = -orient.sin() as f64 * delta as f64;
+                    on_wheel.signal::<GlobalRuntime>(Vector::new(deltax, deltay));
+                }
+                Ok(())
+            }))?;
         }
 
-        Self {
+        Ok(Self {
             on_press,
             on_release,
             on_move,
             on_wheel,
-            handle: Widget::new(parent, panel.cast().unwrap()),
+            handle: Widget::new(parent, panel.cast()?)?,
             panel,
             dwrite,
             swap_chain,
-        }
+        })
     }
 
-    pub fn is_visible(&self) -> bool;
+    pub fn is_visible(&self) -> Result<bool>;
 
-    pub fn set_visible(&mut self, v: bool);
+    pub fn set_visible(&mut self, v: bool) -> Result<()>;
 
-    pub fn is_enabled(&self) -> bool;
+    pub fn is_enabled(&self) -> Result<bool>;
 
-    pub fn set_enabled(&mut self, v: bool);
+    pub fn set_enabled(&mut self, v: bool) -> Result<()>;
 
-    pub fn preferred_size(&self) -> Size {
-        Size::zero()
-    }
+    pub fn loc(&self) -> Result<Point>;
 
-    pub fn loc(&self) -> Point;
+    pub fn set_loc(&mut self, p: Point) -> Result<()>;
 
-    pub fn set_loc(&mut self, p: Point);
+    pub fn size(&self) -> Result<Size>;
 
-    pub fn size(&self) -> Size;
+    pub fn set_size(&mut self, v: Size) -> Result<()>;
 
-    pub fn set_size(&mut self, v: Size);
+    pub fn tooltip(&self) -> Result<String>;
 
-    pub fn context(&mut self) -> DrawingContext<'_> {
-        let size = self.size();
-        let scalex = self.panel.CompositionScaleX().unwrap();
-        let scaley = self.panel.CompositionScaleY().unwrap();
+    pub fn set_tooltip(&mut self, s: impl AsRef<str>) -> Result<()>;
+
+    pub fn context(&mut self) -> Result<DrawingContext<'_>> {
+        let size = self.size()?;
+        let scalex = self.panel.CompositionScaleX()?;
+        let scaley = self.panel.CompositionScaleY()?;
         loop {
-            match self.swap_chain.begin_draw(size, scalex, scaley) {
+            match self
+                .swap_chain
+                .begin_draw(&self.panel, size, scalex, scaley)
+            {
                 Ok(()) => break,
-                Err(e) if is_lost(&e) => self.handle_lost(),
-                Err(e) => panic!("{e:}"),
+                Err(e) if is_lost(&e) => self.handle_lost()?,
+                Err(e) => return Err(e),
             }
         }
         DrawingContext::new(self)
     }
 
-    fn handle_lost(&mut self) {
-        self.swap_chain = SwapChain::new();
-        self.swap_chain.set_to_panel(&self.panel);
+    fn handle_lost(&mut self) -> Result<()> {
+        self.swap_chain = SwapChain::new()?;
+        self.swap_chain.set_to_panel(&self.panel)?;
+        Ok(())
     }
 
     pub async fn wait_mouse_down(&self) -> MouseButton {
@@ -414,62 +415,93 @@ fn mouse_button_from_point(props: &PointerPointProperties) -> Result<MouseButton
 pub struct DrawingContext<'a> {
     ctx: winio_ui_windows_common::DrawingContext,
     canvas: &'a mut Canvas,
+    ended: bool,
 }
 
 impl Drop for DrawingContext<'_> {
     fn drop(&mut self) {
-        match self.canvas.swap_chain.end_draw() {
-            Ok(()) => {}
-            Err(e) if is_lost(&e) => self.canvas.handle_lost(),
-            Err(e) => panic!("{e:?}"),
-        }
-    }
-}
-
-impl<'a> DrawingContext<'a> {
-    fn new(canvas: &'a mut Canvas) -> Self {
-        Self {
-            ctx: winio_ui_windows_common::DrawingContext::new(
-                d2d1(|d2d1| d2d1.clone().into()),
-                canvas.dwrite.clone(),
-                canvas.swap_chain.d2d1_context.clone().into(),
-            ),
-            canvas,
+        if let Err(_e) = self.end_draw() {
+            error!("EndDraw: {_e:?}");
         }
     }
 }
 
 #[inherit_methods(from = "self.ctx")]
-impl DrawingContext<'_> {
-    pub fn draw_path(&mut self, pen: impl Pen, path: &DrawingPath);
+impl<'a> DrawingContext<'a> {
+    fn new(canvas: &'a mut Canvas) -> Result<Self> {
+        Ok(Self {
+            ctx: winio_ui_windows_common::DrawingContext::new(
+                d2d1(|d2d1| Ok(d2d1.clone().into()))?,
+                canvas.dwrite.clone(),
+                canvas.swap_chain.d2d1_context.clone().into(),
+            ),
+            canvas,
+            ended: false,
+        })
+    }
 
-    pub fn fill_path(&mut self, brush: impl Brush, path: &DrawingPath);
+    fn end_draw(&mut self) -> Result<()> {
+        if !self.ended {
+            match self.canvas.swap_chain.end_draw() {
+                Ok(()) => {}
+                Err(e) if is_lost(&e) => self.canvas.handle_lost()?,
+                Err(e) => return Err(e),
+            }
+            self.ended = true;
+        }
+        Ok(())
+    }
 
-    pub fn draw_arc(&mut self, pen: impl Pen, rect: Rect, start: f64, end: f64);
+    pub fn close(mut self) -> Result<()> {
+        self.end_draw()
+    }
 
-    pub fn draw_pie(&mut self, pen: impl Pen, rect: Rect, start: f64, end: f64);
+    pub fn set_transform(&mut self, transform: Transform) -> Result<()>;
 
-    pub fn fill_pie(&mut self, brush: impl Brush, rect: Rect, start: f64, end: f64);
+    pub fn transform(&self) -> Result<Transform>;
 
-    pub fn draw_ellipse(&mut self, pen: impl Pen, rect: Rect);
+    pub fn draw_path(&mut self, pen: impl Pen, path: &DrawingPath) -> Result<()>;
 
-    pub fn fill_ellipse(&mut self, brush: impl Brush, rect: Rect);
+    pub fn fill_path(&mut self, brush: impl Brush, path: &DrawingPath) -> Result<()>;
 
-    pub fn draw_line(&mut self, pen: impl Pen, start: Point, end: Point);
+    pub fn draw_arc(&mut self, pen: impl Pen, rect: Rect, start: f64, end: f64) -> Result<()>;
 
-    pub fn draw_rect(&mut self, pen: impl Pen, rect: Rect);
+    pub fn draw_pie(&mut self, pen: impl Pen, rect: Rect, start: f64, end: f64) -> Result<()>;
 
-    pub fn fill_rect(&mut self, brush: impl Brush, rect: Rect);
+    pub fn fill_pie(&mut self, brush: impl Brush, rect: Rect, start: f64, end: f64) -> Result<()>;
 
-    pub fn draw_round_rect(&mut self, pen: impl Pen, rect: Rect, round: Size);
+    pub fn draw_ellipse(&mut self, pen: impl Pen, rect: Rect) -> Result<()>;
 
-    pub fn fill_round_rect(&mut self, brush: impl Brush, rect: Rect, round: Size);
+    pub fn fill_ellipse(&mut self, brush: impl Brush, rect: Rect) -> Result<()>;
 
-    pub fn draw_str(&mut self, brush: impl Brush, font: DrawingFont, pos: Point, text: &str);
+    pub fn draw_line(&mut self, pen: impl Pen, start: Point, end: Point) -> Result<()>;
 
-    pub fn create_image(&self, image: DynamicImage) -> DrawingImage;
+    pub fn draw_rect(&mut self, pen: impl Pen, rect: Rect) -> Result<()>;
 
-    pub fn draw_image(&mut self, image: &DrawingImage, rect: Rect, clip: Option<Rect>);
+    pub fn fill_rect(&mut self, brush: impl Brush, rect: Rect) -> Result<()>;
 
-    pub fn create_path_builder(&self, start: Point) -> DrawingPathBuilder;
+    pub fn draw_round_rect(&mut self, pen: impl Pen, rect: Rect, round: Size) -> Result<()>;
+
+    pub fn fill_round_rect(&mut self, brush: impl Brush, rect: Rect, round: Size) -> Result<()>;
+
+    pub fn draw_str(
+        &mut self,
+        brush: impl Brush,
+        font: DrawingFont,
+        pos: Point,
+        text: &str,
+    ) -> Result<()>;
+
+    pub fn measure_str(&self, font: DrawingFont, text: &str) -> Result<Size>;
+
+    pub fn create_image(&self, image: DynamicImage) -> Result<DrawingImage>;
+
+    pub fn draw_image(
+        &mut self,
+        image: &DrawingImage,
+        rect: Rect,
+        clip: Option<Rect>,
+    ) -> Result<()>;
+
+    pub fn create_path_builder(&self, start: Point) -> Result<DrawingPathBuilder>;
 }

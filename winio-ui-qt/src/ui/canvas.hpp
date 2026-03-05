@@ -12,11 +12,23 @@
 #include <QWidget>
 #include <memory>
 
+#ifdef WINIO_UI_QT_OPENGL
+#include <QOpenGLWidget>
+#endif
+
+#include <winio-ui-qt/src/ui/canvas.rs.h>
+
 using QtMouseButton = Qt::MouseButton;
 using QtSizeMode = Qt::SizeMode;
 using QImageFormat = QImage::Format;
 
-struct WinioCanvas : public QWidget {
+struct WinioCanvas :
+#ifdef WINIO_UI_QT_OPENGL
+    public QOpenGLWidget
+#else
+    public QWidget
+#endif
+{
     callback_t<void()> m_paint_callback;
     callback_t<void(int, int)> m_move_callback;
     callback_t<void(QtMouseButton)> m_press_callback;
@@ -56,7 +68,10 @@ void painter_set_font(QPainter &p, rust::Str family, double size, bool italic,
 QSizeF painter_measure_text(QPainter &p, QRectF rect, rust::Str text);
 void painter_draw_text(QPainter &p, QRectF rect, rust::Str text);
 
-void color_transparent(QColor &c);
+void painter_set_transform(QPainter &p, WTransform const &t);
+WTransform painter_get_transform(QPainter const &p);
+
+void color_transparent(QColor &c) noexcept;
 bool color_accent(QColor &c);
 
 namespace rust {

@@ -1,17 +1,18 @@
-use std::{mem::MaybeUninit, pin::Pin};
+use std::{cell::RefCell, mem::MaybeUninit, pin::Pin};
 
+use compio_log::error;
 use cxx::{ExternType, UniquePtr, type_id};
-pub(crate) use ffi::QWidget;
 use image::{DynamicImage, Pixel, Rgb, Rgba};
 use inherit_methods_macro::inherit_methods;
 use winio_callback::Callback;
-use winio_handle::AsWindow;
+use winio_handle::AsContainer;
 use winio_primitive::{
     BrushPen, Color, DrawingFont, HAlign, LinearGradientBrush, MouseButton, Point,
-    RadialGradientBrush, Rect, RectBox, RelativeToLogical, Size, SolidColorBrush, VAlign, Vector,
+    RadialGradientBrush, Rect, RectBox, RelativeToLogical, Size, SolidColorBrush, Transform,
+    VAlign, Vector,
 };
 
-use crate::{GlobalRuntime, ui::Widget};
+use crate::{Error, GlobalRuntime, Result, ui::Widget};
 
 #[derive(Debug)]
 pub struct Canvas {
@@ -24,9 +25,9 @@ pub struct Canvas {
 
 #[inherit_methods(from = "self.widget")]
 impl Canvas {
-    pub fn new(parent: impl AsWindow) -> Self {
-        let mut widget = unsafe { ffi::new_canvas(parent.as_window().as_qt()) };
-        widget.pin_mut().setVisible(true);
+    pub fn new(parent: impl AsContainer) -> Result<Self> {
+        let mut widget = unsafe { ffi::new_canvas(parent.as_container().as_qt()) }?;
+        widget.pin_mut().setVisible(true)?;
         let on_move = Box::new(Callback::new());
         let on_press = Box::new(Callback::new());
         let on_release = Box::new(Callback::new());
@@ -36,47 +37,51 @@ impl Canvas {
                 widget.pin_mut(),
                 Self::on_move,
                 on_move.as_ref() as *const _ as _,
-            );
+            )?;
             ffi::canvas_register_press_event(
                 widget.pin_mut(),
                 Self::on_press,
                 on_press.as_ref() as *const _ as _,
-            );
+            )?;
             ffi::canvas_register_release_event(
                 widget.pin_mut(),
                 Self::on_release,
                 on_release.as_ref() as *const _ as _,
-            );
+            )?;
             ffi::canvas_register_wheel_event(
                 widget.pin_mut(),
                 Self::on_wheel,
                 on_wheel.as_ref() as *const _ as _,
-            );
+            )?;
         }
-        Self {
+        Ok(Self {
             on_move,
             on_press,
             on_release,
             on_wheel,
-            widget: Widget::new(widget),
-        }
+            widget: Widget::new(widget)?,
+        })
     }
 
-    pub fn is_visible(&self) -> bool;
+    pub fn is_visible(&self) -> Result<bool>;
 
-    pub fn set_visible(&mut self, v: bool);
+    pub fn set_visible(&mut self, v: bool) -> Result<()>;
 
-    pub fn is_enabled(&self) -> bool;
+    pub fn is_enabled(&self) -> Result<bool>;
 
-    pub fn set_enabled(&mut self, v: bool);
+    pub fn set_enabled(&mut self, v: bool) -> Result<()>;
 
-    pub fn loc(&self) -> Point;
+    pub fn loc(&self) -> Result<Point>;
 
-    pub fn set_loc(&mut self, p: Point);
+    pub fn set_loc(&mut self, p: Point) -> Result<()>;
 
-    pub fn size(&self) -> Size;
+    pub fn size(&self) -> Result<Size>;
 
-    pub fn set_size(&mut self, s: Size);
+    pub fn set_size(&mut self, s: Size) -> Result<()>;
+
+    pub fn tooltip(&self) -> Result<String>;
+
+    pub fn set_tooltip(&mut self, s: impl AsRef<str>) -> Result<()>;
 
     fn on_move(c: *const u8, x: i32, y: i32) {
         let c = c as *const Callback<Point>;
@@ -106,12 +111,8 @@ impl Canvas {
         }
     }
 
-    pub fn context(&mut self) -> DrawingContext<'_> {
-        DrawingContext {
-            painter: ffi::canvas_new_painter(self.widget.pin_mut()),
-            size: self.widget.size(),
-            canvas: self,
-        }
+    pub fn context(&mut self) -> Result<DrawingContext<'_>> {
+        DrawingContext::new(ffi::canvas_new_painter(self.widget.pin_mut())?, self)
     }
 
     pub async fn wait_mouse_down(&self) -> MouseButton {
@@ -134,15 +135,28 @@ impl Canvas {
 winio_handle::impl_as_widget!(Canvas, widget);
 
 pub struct DrawingContext<'a> {
-    painter: UniquePtr<ffi::QPainter>,
+    painter: RefCell<UniquePtr<ffi::QPainter>>,
     size: Size,
     canvas: &'a mut Canvas,
+    ended: bool,
+}
+
+impl<'a> DrawingContext<'a> {
+    fn new(painter: UniquePtr<ffi::QPainter>, canvas: &'a mut Canvas) -> Result<Self> {
+        Ok(Self {
+            painter: RefCell::new(painter),
+            size: canvas.size()?,
+            canvas,
+            ended: false,
+        })
+    }
 }
 
 impl Drop for DrawingContext<'_> {
     fn drop(&mut self) {
-        self.painter.pin_mut().end();
-        self.canvas.widget.pin_mut().update();
+        if let Err(_e) = self.end() {
+            error!("Failed to end drawing context: {_e:?}");
+        }
     }
 }
 
@@ -157,121 +171,182 @@ fn drawing_angle(angle: f64) -> i32 {
 }
 
 impl DrawingContext<'_> {
-    fn set_brush(&mut self, brush: impl Brush, rect: Rect) {
-        self.painter
+    fn end(&mut self) -> Result<()> {
+        if !self.ended {
+            self.painter.get_mut().pin_mut().end()?;
+            self.canvas.widget.pin_mut().update()?;
+            self.ended = true;
+        }
+        Ok(())
+    }
+
+    pub fn close(mut self) -> Result<()> {
+        self.end()
+    }
+
+    pub fn set_transform(&mut self, transform: Transform) -> Result<()> {
+        let painter = self.painter.get_mut();
+        if transform == Transform::identity() {
+            painter.pin_mut().resetTransform()?;
+        } else {
+            ffi::painter_set_transform(painter.pin_mut(), &transform.into())?;
+        }
+        Ok(())
+    }
+
+    pub fn transform(&self) -> Result<Transform> {
+        let painter = self.painter.borrow();
+        let t = ffi::painter_get_transform(&painter)?;
+        Ok(t.into())
+    }
+
+    fn set_brush(&mut self, brush: impl Brush, rect: Rect) -> Result<()> {
+        let painter = self.painter.get_mut();
+        painter.pin_mut().setBrush(&brush.create(to_trans(rect))?)?;
+        painter.pin_mut().setPen_color(&QColor::transparent())?;
+        Ok(())
+    }
+
+    fn set_pen(&mut self, pen: impl Pen, rect: Rect) -> Result<()> {
+        let painter = self.painter.get_mut();
+        painter.pin_mut().setPen(&pen.create(to_trans(rect))?)?;
+        painter
             .pin_mut()
-            .setBrush(&brush.create(to_trans(rect)));
-        self.painter.pin_mut().setPen_color(&QColor::transparent());
+            .setBrush(&ffi::new_brush(&QColor::transparent())?)?;
+        Ok(())
     }
 
-    fn set_pen(&mut self, pen: impl Pen, rect: Rect) {
-        self.painter.pin_mut().setPen(&pen.create(to_trans(rect)));
+    pub fn draw_path(&mut self, pen: impl Pen, path: &DrawingPath) -> Result<()> {
+        let rect = path.0.boundingRect()?;
+        self.set_pen(pen, rect.0)?;
+        self.painter.get_mut().pin_mut().drawPath(&path.0)?;
+        Ok(())
+    }
+
+    pub fn fill_path(&mut self, brush: impl Brush, path: &DrawingPath) -> Result<()> {
+        let rect = path.0.boundingRect()?;
+        self.set_brush(brush, rect.0)?;
+        self.painter.get_mut().pin_mut().drawPath(&path.0)?;
+        Ok(())
+    }
+
+    pub fn draw_arc(&mut self, pen: impl Pen, rect: Rect, start: f64, end: f64) -> Result<()> {
+        self.set_pen(pen, rect)?;
+        self.painter.get_mut().pin_mut().drawArc(
+            &QRectF(rect),
+            drawing_angle(start),
+            drawing_angle(end - start),
+        )?;
+        Ok(())
+    }
+
+    pub fn draw_pie(&mut self, pen: impl Pen, rect: Rect, start: f64, end: f64) -> Result<()> {
+        self.set_pen(pen, rect)?;
+        self.painter.get_mut().pin_mut().drawPie(
+            &QRectF(rect),
+            drawing_angle(start),
+            drawing_angle(end - start),
+        )?;
+        Ok(())
+    }
+
+    pub fn fill_pie(&mut self, brush: impl Brush, rect: Rect, start: f64, end: f64) -> Result<()> {
+        self.set_brush(brush, rect)?;
+        self.painter.get_mut().pin_mut().drawPie(
+            &QRectF(rect),
+            drawing_angle(start),
+            drawing_angle(end - start),
+        )?;
+        Ok(())
+    }
+
+    pub fn draw_ellipse(&mut self, pen: impl Pen, rect: Rect) -> Result<()> {
+        self.set_pen(pen, rect)?;
         self.painter
+            .get_mut()
             .pin_mut()
-            .setBrush(&ffi::new_brush(&QColor::transparent()));
+            .drawEllipse(&QRectF(rect))?;
+        Ok(())
     }
 
-    pub fn draw_path(&mut self, pen: impl Pen, path: &DrawingPath) {
-        let rect = path.0.boundingRect();
-        self.set_pen(pen, rect.0);
-        self.painter.pin_mut().drawPath(&path.0);
+    pub fn fill_ellipse(&mut self, brush: impl Brush, rect: Rect) -> Result<()> {
+        self.set_brush(brush, rect)?;
+        self.painter
+            .get_mut()
+            .pin_mut()
+            .drawEllipse(&QRectF(rect))?;
+        Ok(())
     }
 
-    pub fn fill_path(&mut self, brush: impl Brush, path: &DrawingPath) {
-        let rect = path.0.boundingRect();
-        self.set_brush(brush, rect.0);
-        self.painter.pin_mut().drawPath(&path.0);
-    }
-
-    pub fn draw_arc(&mut self, pen: impl Pen, rect: Rect, start: f64, end: f64) {
-        self.set_pen(pen, rect);
-        self.painter.pin_mut().drawArc(
-            &QRectF(rect),
-            drawing_angle(start),
-            drawing_angle(end - start),
-        );
-    }
-
-    pub fn draw_pie(&mut self, pen: impl Pen, rect: Rect, start: f64, end: f64) {
-        self.set_pen(pen, rect);
-        self.painter.pin_mut().drawPie(
-            &QRectF(rect),
-            drawing_angle(start),
-            drawing_angle(end - start),
-        );
-    }
-
-    pub fn fill_pie(&mut self, brush: impl Brush, rect: Rect, start: f64, end: f64) {
-        self.set_brush(brush, rect);
-        self.painter.pin_mut().drawPie(
-            &QRectF(rect),
-            drawing_angle(start),
-            drawing_angle(end - start),
-        );
-    }
-
-    pub fn draw_ellipse(&mut self, pen: impl Pen, rect: Rect) {
-        self.set_pen(pen, rect);
-        self.painter.pin_mut().drawEllipse(&QRectF(rect));
-    }
-
-    pub fn fill_ellipse(&mut self, brush: impl Brush, rect: Rect) {
-        self.set_brush(brush, rect);
-        self.painter.pin_mut().drawEllipse(&QRectF(rect));
-    }
-
-    pub fn draw_line(&mut self, pen: impl Pen, start: Point, end: Point) {
+    pub fn draw_line(&mut self, pen: impl Pen, start: Point, end: Point) -> Result<()> {
         let rect = RectBox::new(
             Point::new(start.x.min(end.x), start.y.min(end.y)),
             Point::new(start.x.max(end.x), start.y.max(end.y)),
         )
         .to_rect();
-        self.set_pen(pen, rect);
+        self.set_pen(pen, rect)?;
         self.painter
+            .get_mut()
             .pin_mut()
-            .drawLine(&QPointF(start), &QPointF(end));
+            .drawLine(&QPointF(start), &QPointF(end))?;
+        Ok(())
     }
 
-    pub fn draw_rect(&mut self, pen: impl Pen, rect: Rect) {
-        self.set_pen(pen, rect);
-        self.painter.pin_mut().drawRect(&QRectF(rect));
+    pub fn draw_rect(&mut self, pen: impl Pen, rect: Rect) -> Result<()> {
+        self.set_pen(pen, rect)?;
+        self.painter.get_mut().pin_mut().drawRect(&QRectF(rect))?;
+        Ok(())
     }
 
-    pub fn fill_rect(&mut self, brush: impl Brush, rect: Rect) {
-        self.set_brush(brush, rect);
-        self.painter.pin_mut().drawRect(&QRectF(rect));
+    pub fn fill_rect(&mut self, brush: impl Brush, rect: Rect) -> Result<()> {
+        self.set_brush(brush, rect)?;
+        self.painter.get_mut().pin_mut().drawRect(&QRectF(rect))?;
+        Ok(())
     }
 
-    pub fn draw_round_rect(&mut self, pen: impl Pen, rect: Rect, round: Size) {
-        self.set_pen(pen, rect);
-        self.painter.pin_mut().drawRoundedRect(
+    pub fn draw_round_rect(&mut self, pen: impl Pen, rect: Rect, round: Size) -> Result<()> {
+        self.set_pen(pen, rect)?;
+        self.painter.get_mut().pin_mut().drawRoundedRect(
             &QRectF(rect),
             round.width,
             round.height,
             QtSizeMode::AbsoluteSize,
-        );
+        )?;
+        Ok(())
     }
 
-    pub fn fill_round_rect(&mut self, brush: impl Brush, rect: Rect, round: Size) {
-        self.set_brush(brush, rect);
-        self.painter.pin_mut().drawRoundedRect(
+    pub fn fill_round_rect(&mut self, brush: impl Brush, rect: Rect, round: Size) -> Result<()> {
+        self.set_brush(brush, rect)?;
+        self.painter.get_mut().pin_mut().drawRoundedRect(
             &QRectF(rect),
             round.width,
             round.height,
             QtSizeMode::AbsoluteSize,
-        );
+        )?;
+        Ok(())
     }
 
-    pub fn draw_str(&mut self, brush: impl Brush, font: DrawingFont, pos: Point, text: &str) {
+    fn measure_str_impl(&self, font: &DrawingFont, text: &str) -> Result<Size> {
+        let mut painter = self.painter.borrow_mut();
         ffi::painter_set_font(
-            self.painter.pin_mut(),
+            painter.pin_mut(),
             &font.family,
             font.size,
             font.italic,
             font.bold,
-        );
+        )?;
         let rect = Rect::new(Point::zero(), self.size);
-        let size = ffi::painter_measure_text(self.painter.pin_mut(), QRectF(rect), text).0;
+        Ok(ffi::painter_measure_text(painter.pin_mut(), QRectF(rect), text)?.0)
+    }
+
+    pub fn draw_str(
+        &mut self,
+        brush: impl Brush,
+        font: DrawingFont,
+        pos: Point,
+        text: &str,
+    ) -> Result<()> {
+        let size = self.measure_str_impl(&font, text)?;
         let mut rect = Rect::new(pos, size);
         match font.halign {
             HAlign::Center => rect.origin.x -= rect.width() / 2.0,
@@ -284,25 +359,39 @@ impl DrawingContext<'_> {
             _ => {}
         }
 
-        self.set_pen(BrushPen::new(brush, 1.0), rect);
-        ffi::painter_draw_text(self.painter.pin_mut(), QRectF(rect), text);
+        self.set_pen(BrushPen::new(brush, 1.0), rect)?;
+        ffi::painter_draw_text(self.painter.get_mut().pin_mut(), QRectF(rect), text)?;
+        Ok(())
     }
 
-    pub fn create_image(&self, image: DynamicImage) -> DrawingImage {
+    pub fn measure_str(&self, font: DrawingFont, text: &str) -> Result<Size> {
+        self.measure_str_impl(&font, text)
+    }
+
+    pub fn create_image(&self, image: DynamicImage) -> Result<DrawingImage> {
         DrawingImage::new(image)
     }
 
-    pub fn draw_image(&mut self, image: &DrawingImage, rect: Rect, clip: Option<Rect>) {
-        let clip = clip.unwrap_or_else(|| Rect::new(Point::zero(), image.size()));
+    pub fn draw_image(
+        &mut self,
+        image: &DrawingImage,
+        rect: Rect,
+        clip: Option<Rect>,
+    ) -> Result<()> {
+        let clip = match clip {
+            Some(clip) => clip,
+            None => Rect::new(Point::zero(), image.size()?),
+        };
         ffi::painter_draw_image(
-            self.painter.pin_mut(),
+            self.painter.get_mut().pin_mut(),
             &QRectF(rect),
             &image.pixmap,
             &QRectF(clip),
-        );
+        )?;
+        Ok(())
     }
 
-    pub fn create_path_builder(&self, start: Point) -> DrawingPathBuilder {
+    pub fn create_path_builder(&self, start: Point) -> Result<DrawingPathBuilder> {
         DrawingPathBuilder::new(start)
     }
 }
@@ -312,17 +401,25 @@ pub struct DrawingPath(UniquePtr<ffi::QPainterPath>);
 pub struct DrawingPathBuilder(UniquePtr<ffi::QPainterPath>);
 
 impl DrawingPathBuilder {
-    fn new(start: Point) -> Self {
-        let mut ptr = ffi::new_path();
-        ptr.pin_mut().moveTo(start.x, start.y);
-        Self(ptr)
+    fn new(start: Point) -> Result<Self> {
+        let mut ptr = ffi::new_path()?;
+        ptr.pin_mut().moveTo(start.x, start.y)?;
+        Ok(Self(ptr))
     }
 
-    pub fn add_line(&mut self, p: Point) {
-        self.0.pin_mut().lineTo(p.x, p.y);
+    pub fn add_line(&mut self, p: Point) -> Result<()> {
+        self.0.pin_mut().lineTo(p.x, p.y)?;
+        Ok(())
     }
 
-    pub fn add_arc(&mut self, center: Point, radius: Size, start: f64, end: f64, clockwise: bool) {
+    pub fn add_arc(
+        &mut self,
+        center: Point,
+        radius: Size,
+        start: f64,
+        end: f64,
+        clockwise: bool,
+    ) -> Result<()> {
         self.0.pin_mut().arcTo(
             center.x - radius.width,
             center.y - radius.height,
@@ -330,93 +427,100 @@ impl DrawingPathBuilder {
             radius.height * 2.0,
             start,
             if clockwise { start - end } else { end - start } / std::f64::consts::PI * 180.0,
-        );
+        )?;
+        Ok(())
     }
 
-    pub fn add_bezier(&mut self, p1: Point, p2: Point, p3: Point) {
-        self.0.pin_mut().cubicTo(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
+    pub fn add_bezier(&mut self, p1: Point, p2: Point, p3: Point) -> Result<()> {
+        self.0
+            .pin_mut()
+            .cubicTo(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y)?;
+        Ok(())
     }
 
-    pub fn build(mut self, close: bool) -> DrawingPath {
+    pub fn build(mut self, close: bool) -> Result<DrawingPath> {
         if close {
-            self.0.pin_mut().closeSubpath();
+            self.0.pin_mut().closeSubpath()?;
         }
-        DrawingPath(self.0)
+        Ok(DrawingPath(self.0))
     }
 }
 
 /// Drawing brush.
 pub trait Brush {
     #[doc(hidden)]
-    fn create(&self, trans: RelativeToLogical) -> QBrush;
+    fn create(&self, trans: RelativeToLogical) -> Result<QBrush>;
 }
 
 impl<B: Brush> Brush for &'_ B {
-    fn create(&self, trans: RelativeToLogical) -> QBrush {
+    fn create(&self, trans: RelativeToLogical) -> Result<QBrush> {
         (**self).create(trans)
     }
 }
 
 impl Brush for SolidColorBrush {
-    fn create(&self, _trans: RelativeToLogical) -> QBrush {
-        ffi::new_brush(&self.color.into())
+    fn create(&self, _trans: RelativeToLogical) -> Result<QBrush> {
+        Ok(ffi::new_brush(&self.color.into())?)
     }
 }
 
 impl Brush for LinearGradientBrush {
-    fn create(&self, trans: RelativeToLogical) -> QBrush {
+    fn create(&self, trans: RelativeToLogical) -> Result<QBrush> {
         let mut g = ffi::new_gradient_linear(
             QPointF(Point::new(self.start.x, self.start.y)),
             QPointF(Point::new(self.end.x, self.end.y)),
-        );
+        )?;
         for stop in &self.stops {
-            g.pin_mut().setColorAt(stop.pos, &QColor::from(stop.color));
+            g.pin_mut()
+                .setColorAt(stop.pos, &QColor::from(stop.color))?;
         }
-        let mut brush = ffi::new_brush_gradient(&g);
-        brush_set_transform(Pin::new(&mut brush), trans);
-        brush
+        let mut brush = ffi::new_brush_gradient(&g)?;
+        brush_set_transform(Pin::new(&mut brush), trans)?;
+        Ok(brush)
     }
 }
 
 impl Brush for RadialGradientBrush {
-    fn create(&self, trans: RelativeToLogical) -> QBrush {
+    fn create(&self, trans: RelativeToLogical) -> Result<QBrush> {
         let trans = trans.then_scale(1.0, self.radius.height / self.radius.width);
         let mut g = ffi::new_gradient_radial(
             QPointF(Point::new(self.center.x, self.center.y)),
             self.radius.width,
             QPointF(Point::new(self.origin.x, self.origin.y)),
-        );
+        )?;
         for stop in &self.stops {
-            g.pin_mut().setColorAt(stop.pos, &QColor::from(stop.color));
+            g.pin_mut()
+                .setColorAt(stop.pos, &QColor::from(stop.color))?;
         }
-        let mut brush = ffi::new_brush_gradient(&g);
-        brush_set_transform(Pin::new(&mut brush), trans);
-        brush
+        let mut brush = ffi::new_brush_gradient(&g)?;
+        brush_set_transform(Pin::new(&mut brush), trans)?;
+        Ok(brush)
     }
 }
 
-fn brush_set_transform(b: Pin<&mut ffi::QBrush>, trans: RelativeToLogical) {
+fn brush_set_transform(b: Pin<&mut ffi::QBrush>, trans: RelativeToLogical) -> Result<()> {
     ffi::brush_set_transform(
         b, trans.m11, trans.m12, trans.m21, trans.m22, trans.m31, trans.m32,
-    );
+    )?;
+    Ok(())
 }
 
 /// Drawing pen.
 pub trait Pen {
     #[doc(hidden)]
-    fn create(&self, trans: RelativeToLogical) -> QPen;
+    fn create(&self, trans: RelativeToLogical) -> Result<QPen>;
 }
 
 impl<P: Pen> Pen for &'_ P {
-    fn create(&self, trans: RelativeToLogical) -> QPen {
+    fn create(&self, trans: RelativeToLogical) -> Result<QPen> {
         (**self).create(trans)
     }
 }
 
 impl<B: Brush> Pen for BrushPen<B> {
-    fn create(&self, trans: RelativeToLogical) -> QPen {
-        let brush = self.brush.create(trans);
-        ffi::new_pen(&brush, self.width)
+    fn create(&self, trans: RelativeToLogical) -> Result<QPen> {
+        let brush = self.brush.create(trans)?;
+        Ok(ffi::new_pen(&brush, self.width)?)
     }
 }
 
@@ -427,7 +531,7 @@ pub struct DrawingImage {
 }
 
 impl DrawingImage {
-    fn new(image: DynamicImage) -> Self {
+    fn new(image: DynamicImage) -> Result<Self> {
         let width = image.width();
         let height = image.height();
         let (format, buffer, count) = match image {
@@ -464,19 +568,20 @@ impl DrawingImage {
                 (width * count as u32) as _,
                 buffer.as_ptr(),
                 format,
-            )
+            )?
         };
-        Self { buffer, pixmap }
+        Ok(Self { buffer, pixmap })
     }
 
-    pub fn size(&self) -> Size {
-        Size::new(self.pixmap.width() as _, self.pixmap.height() as _)
+    pub fn size(&self) -> Result<Size> {
+        let size = self.pixmap.size()?;
+        Ok(Size::new(size.width as _, size.height as _))
     }
 }
 
 /// Get the accent color.
-pub fn accent_color() -> Option<Color> {
-    QColor::accent().map(From::from)
+pub fn accent_color() -> Result<Color> {
+    Ok(QColor::accent()?.into())
 }
 
 #[repr(i32)]
@@ -576,15 +681,15 @@ impl QColor {
         c
     }
 
-    pub fn accent() -> Option<Self> {
+    pub fn accent() -> Result<Self> {
         let mut c = Self {
             cspec: Spec::Invalid,
             ct: [0; 5],
         };
-        if ffi::color_accent(Pin::new(&mut c)) {
-            Some(c)
+        if ffi::color_accent(Pin::new(&mut c))? {
+            Ok(c)
         } else {
-            None
+            Err(Error::NotSupported)
         }
     }
 }
@@ -679,35 +784,63 @@ impl Drop for QBrush {
     }
 }
 
+impl From<Transform> for ffi::WTransform {
+    fn from(t: Transform) -> Self {
+        Self {
+            m11: t.m11,
+            m12: t.m12,
+            m21: t.m21,
+            m22: t.m22,
+            m31: t.m31,
+            m32: t.m32,
+        }
+    }
+}
+
+impl From<ffi::WTransform> for Transform {
+    fn from(t: ffi::WTransform) -> Self {
+        Self::new(t.m11, t.m12, t.m21, t.m22, t.m31, t.m32)
+    }
+}
+
 #[cxx::bridge]
 mod ffi {
+    struct WTransform {
+        m11: f64,
+        m12: f64,
+        m21: f64,
+        m22: f64,
+        m31: f64,
+        m32: f64,
+    }
+
     unsafe extern "C++-unwind" {
         include!("winio-ui-qt/src/ui/canvas.hpp");
 
-        type QWidget;
+        type QWidget = crate::ui::QWidget;
         type QtMouseButton = super::QtMouseButton;
 
-        unsafe fn new_canvas(parent: *mut QWidget) -> UniquePtr<QWidget>;
+        unsafe fn new_canvas(parent: *mut QWidget) -> Result<UniquePtr<QWidget>>;
         unsafe fn canvas_register_move_event(
             w: Pin<&mut QWidget>,
             callback: unsafe fn(*const u8, i32, i32),
             data: *const u8,
-        );
+        ) -> Result<()>;
         unsafe fn canvas_register_press_event(
             w: Pin<&mut QWidget>,
             callback: unsafe fn(*const u8, QtMouseButton),
             data: *const u8,
-        );
+        ) -> Result<()>;
         unsafe fn canvas_register_release_event(
             w: Pin<&mut QWidget>,
             callback: unsafe fn(*const u8, QtMouseButton),
             data: *const u8,
-        );
+        ) -> Result<()>;
         unsafe fn canvas_register_wheel_event(
             w: Pin<&mut QWidget>,
             callback: unsafe fn(*const u8, i32, i32),
             data: *const u8,
-        );
+        ) -> Result<()>;
 
         type QPainter;
         type QColor = super::QColor;
@@ -715,66 +848,80 @@ mod ffi {
         type QPointF = super::QPointF;
         type QSizeF = super::QSizeF;
         type QtSizeMode = super::QtSizeMode;
+        type QSize = crate::ui::QSize;
 
         fn alpha(self: &QColor) -> i32;
         fn red(self: &QColor) -> i32;
         fn green(self: &QColor) -> i32;
         fn blue(self: &QColor) -> i32;
 
-        fn drawArc(self: Pin<&mut QPainter>, rectangle: &QRectF, start: i32, span: i32);
-        fn drawPie(self: Pin<&mut QPainter>, rectangle: &QRectF, start: i32, span: i32);
-        fn drawEllipse(self: Pin<&mut QPainter>, rectangle: &QRectF);
-        fn drawLine(self: Pin<&mut QPainter>, p1: &QPointF, p2: &QPointF);
-        fn drawRect(self: Pin<&mut QPainter>, rectangle: &QRectF);
+        fn drawArc(
+            self: Pin<&mut QPainter>,
+            rectangle: &QRectF,
+            start: i32,
+            span: i32,
+        ) -> Result<()>;
+        fn drawPie(
+            self: Pin<&mut QPainter>,
+            rectangle: &QRectF,
+            start: i32,
+            span: i32,
+        ) -> Result<()>;
+        fn drawEllipse(self: Pin<&mut QPainter>, rectangle: &QRectF) -> Result<()>;
+        fn drawLine(self: Pin<&mut QPainter>, p1: &QPointF, p2: &QPointF) -> Result<()>;
+        fn drawRect(self: Pin<&mut QPainter>, rectangle: &QRectF) -> Result<()>;
         fn drawRoundedRect(
             self: Pin<&mut QPainter>,
             rectangle: &QRectF,
             xr: f64,
             yr: f64,
             mode: QtSizeMode,
-        );
-        fn drawPath(self: Pin<&mut QPainter>, path: &QPainterPath);
+        ) -> Result<()>;
+        fn drawPath(self: Pin<&mut QPainter>, path: &QPainterPath) -> Result<()>;
 
-        fn end(self: Pin<&mut QPainter>) -> bool;
+        fn end(self: Pin<&mut QPainter>) -> Result<bool>;
 
-        fn canvas_new_painter(w: Pin<&mut QWidget>) -> UniquePtr<QPainter>;
+        fn canvas_new_painter(w: Pin<&mut QWidget>) -> Result<UniquePtr<QPainter>>;
         fn painter_set_font(
             p: Pin<&mut QPainter>,
             family: &str,
             size: f64,
             italic: bool,
             bold: bool,
-        );
-        fn painter_measure_text(p: Pin<&mut QPainter>, rect: QRectF, text: &str) -> QSizeF;
-        fn painter_draw_text(p: Pin<&mut QPainter>, rect: QRectF, text: &str);
+        ) -> Result<()>;
+        fn painter_measure_text(p: Pin<&mut QPainter>, rect: QRectF, text: &str) -> Result<QSizeF>;
+        fn painter_draw_text(p: Pin<&mut QPainter>, rect: QRectF, text: &str) -> Result<()>;
+        fn painter_set_transform(p: Pin<&mut QPainter>, t: &WTransform) -> Result<()>;
+        fn painter_get_transform(p: &QPainter) -> Result<WTransform>;
+        fn resetTransform(self: Pin<&mut QPainter>) -> Result<()>;
 
         type QBrush = super::QBrush;
         type QPen = super::QPen;
 
-        fn setBrush(self: Pin<&mut QPainter>, brush: &QBrush);
-        fn setPen(self: Pin<&mut QPainter>, pen: &QPen);
+        fn setBrush(self: Pin<&mut QPainter>, brush: &QBrush) -> Result<()>;
+        fn setPen(self: Pin<&mut QPainter>, pen: &QPen) -> Result<()>;
         #[rust_name = "setPen_color"]
-        fn setPen(self: Pin<&mut QPainter>, color: &QColor);
+        fn setPen(self: Pin<&mut QPainter>, color: &QColor) -> Result<()>;
 
         fn color_transparent(c: Pin<&mut QColor>);
-        fn color_accent(c: Pin<&mut QColor>) -> bool;
-        fn new_brush(c: &QColor) -> QBrush;
-        fn new_pen(b: &QBrush, width: f64) -> QPen;
+        fn color_accent(c: Pin<&mut QColor>) -> Result<bool>;
+        fn new_brush(c: &QColor) -> Result<QBrush>;
+        fn new_pen(b: &QBrush, width: f64) -> Result<QPen>;
 
         fn brush_drop(b: Pin<&mut QBrush>);
         fn pen_drop(p: Pin<&mut QPen>);
 
         type QGradient;
 
-        fn new_gradient_linear(start: QPointF, end: QPointF) -> UniquePtr<QGradient>;
+        fn new_gradient_linear(start: QPointF, end: QPointF) -> Result<UniquePtr<QGradient>>;
         fn new_gradient_radial(
             center: QPointF,
             radius: f64,
             origin: QPointF,
-        ) -> UniquePtr<QGradient>;
-        fn setColorAt(self: Pin<&mut QGradient>, pos: f64, c: &QColor);
+        ) -> Result<UniquePtr<QGradient>>;
+        fn setColorAt(self: Pin<&mut QGradient>, pos: f64, c: &QColor) -> Result<()>;
 
-        fn new_brush_gradient(g: &QGradient) -> QBrush;
+        fn new_brush_gradient(g: &QGradient) -> Result<QBrush>;
         fn brush_set_transform(
             b: Pin<&mut QBrush>,
             m11: f64,
@@ -783,7 +930,7 @@ mod ffi {
             m22: f64,
             m31: f64,
             m32: f64,
-        );
+        ) -> Result<()>;
 
         type QImage;
         type QImageFormat = super::QImageFormat;
@@ -794,23 +941,22 @@ mod ffi {
             stride: i32,
             bits: *const u8,
             format: QImageFormat,
-        ) -> UniquePtr<QImage>;
+        ) -> Result<UniquePtr<QImage>>;
         fn painter_draw_image(
             p: Pin<&mut QPainter>,
             target: &QRectF,
             image: &QImage,
             source: &QRectF,
-        );
+        ) -> Result<()>;
 
-        fn width(self: &QImage) -> i32;
-        fn height(self: &QImage) -> i32;
+        fn size(self: &QImage) -> Result<QSize>;
 
         type QPainterPath;
 
-        fn new_path() -> UniquePtr<QPainterPath>;
+        fn new_path() -> Result<UniquePtr<QPainterPath>>;
 
-        fn moveTo(self: Pin<&mut QPainterPath>, x: f64, y: f64);
-        fn lineTo(self: Pin<&mut QPainterPath>, x: f64, y: f64);
+        fn moveTo(self: Pin<&mut QPainterPath>, x: f64, y: f64) -> Result<()>;
+        fn lineTo(self: Pin<&mut QPainterPath>, x: f64, y: f64) -> Result<()>;
         fn arcTo(
             self: Pin<&mut QPainterPath>,
             x: f64,
@@ -819,7 +965,7 @@ mod ffi {
             height: f64,
             start: f64,
             sweep: f64,
-        );
+        ) -> Result<()>;
         fn cubicTo(
             self: Pin<&mut QPainterPath>,
             x1: f64,
@@ -828,8 +974,8 @@ mod ffi {
             y2: f64,
             x3: f64,
             y3: f64,
-        );
-        fn closeSubpath(self: Pin<&mut QPainterPath>);
-        fn boundingRect(self: &QPainterPath) -> QRectF;
+        ) -> Result<()>;
+        fn closeSubpath(self: Pin<&mut QPainterPath>) -> Result<()>;
+        fn boundingRect(self: &QPainterPath) -> Result<QRectF>;
     }
 }

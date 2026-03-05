@@ -1,9 +1,8 @@
 [package]
 name = "winio-ui-winui"
-version = "0.1.2"
+version = "0.4.0"
 description = "WinUI backend for winio."
 edition = { workspace = true }
-authors = { workspace = true }
 readme = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
@@ -18,24 +17,31 @@ compio = { workspace = true }
 compio-runtime = { workspace = true, features = ["notify-always"] }
 compio-log = { workspace = true }
 
-image = { workspace = true, default-features = false }
+image = { workspace = true }
 inherit-methods-macro = { workspace = true }
+once_cell = { workspace = true }
 oneshot = { version = "0.1", default-features = false, features = ["std"] }
+percent-encoding = { workspace = true, optional = true }
 scoped-tls = { workspace = true }
-send_wrapper = "0.6"
+send_wrapper = { workspace = true }
 widestring = { workspace = true }
 
 winui3 = { workspace = true, features = [
     "native",
-    "XamlApp",
     "UI_Composition",
+    "UI_Composition_SystemBackdrops",
     "UI_Dispatching",
     "UI_Windowing",
     "UI_Xaml_Controls_Primitives",
     "UI_Xaml_Input",
+    "UI_Xaml_Interop",
+    "UI_Xaml_Markup",
+    "UI_Xaml_Media",
+    "UI_Xaml_XamlTypeInfo",
 ] }
 windows-sys = { workspace = true, features = [
     "Win32_Security",
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
 ] }
@@ -47,7 +53,23 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
+    "Win32_Storage_Packaging_Appx",
 ] }
+windows-core = { workspace = true }
+
+slim-detours-sys = { workspace = true }
+sync-unsafe-cell = { workspace = true }
 
 [features]
+media = ["windows/Media_Core", "dep:percent-encoding"]
+webview = ["winui3/Web_WebView2_Core"]
+
+# Use CBS WinUI3 shipped with Windows
+enable-cbs = []
+# Use WebView2 Core shipped with Windows
+webview-system = []
+
 win32-dark-mode = ["winio-ui-windows-common/dark-mode"]
+
+once_cell_try = ["winio-ui-windows-common/once_cell_try"]
+nightly = ["once_cell_try"]

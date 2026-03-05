@@ -1,8 +1,20 @@
 # Winio
 
 Winio is a single-threaded asynchronous GUI runtime.
-It is based on [`compio`](https://github.com/compio-rs/compio), and the GUI part is powered by Win32, Qt, GTK and Cocoa.
+It is based on [`compio`](https://github.com/compio-rs/compio), and the GUI part is powered by Win32, WinUI 3, Qt 5/6, GTK 4 or AppKit.
 All IO requests could be issued in the same thread as GUI, without blocking the user interface!
+
+## Example
+
+Read the [examples](winio/examples) and learn more!
+
+| Backend | Light                                  | Dark                                 |
+| ------- | -------------------------------------- | ------------------------------------ |
+| Win32   | ![Win32 Light](assets/win32.light.png) | ![Win32 Dark](assets/win32.dark.png) |
+| WinUI 3 | ![WinUI Light](assets/winui.light.png) | ![WinUI Dark](assets/winui.dark.png) |
+| Qt 6    | ![Qt Light](assets/qt.light.png)       | ![Qt Dark](assets/qt.dark.png)       |
+| GTK 4   | ![GTK Light](assets/gtk.light.png)     | ![GTK Dark](assets/gtk.dark.png)     |
+| AppKit  | ![macOS Light](assets/mac.light.png)   | ![macOS Dark](assets/mac.dark.png)   |
 
 ## Quick start
 
@@ -12,8 +24,8 @@ The application starts with a root `Component`:
 ```rust
 use winio::prelude::*;
 
-fn main() {
-    App::new("rs.compio.winio.example").run::<MainModel>(());
+fn main() -> Result<()> {
+    App::new("rs.compio.winio.example")?.run::<MainModel>(())
 }
 
 struct MainModel {
@@ -26,20 +38,21 @@ enum MainMessage {
 }
 
 impl Component for MainModel {
+    type Error = Error;
     type Event = ();
     type Init<'a> = ();
     type Message = MainMessage;
 
-    fn init(_init: Self::Init<'_>, _sender: &ComponentSender<Self>) -> Self {
+    async fn init(_init: Self::Init<'_>, _sender: &ComponentSender<Self>) -> Result<Self> {
         // create & initialize the window
         init! {
             window: Window = (()) => {
-                text: "Basic example",
+                text: "Example",
                 size: Size::new(800.0, 600.0),
             }
         }
-        window.show();
-        Self { window }
+        window.show()?;
+        Ok(Self { window })
     }
 
     async fn start(&mut self, sender: &ComponentSender<Self>) -> ! {
@@ -52,24 +65,32 @@ impl Component for MainModel {
         }
     }
 
-    async fn update(&mut self, message: Self::Message, sender: &ComponentSender<Self>) -> bool {
+    async fn update_children(&mut self) -> Result<bool> {
         // update the window
-        self.window.update().await;
+        update_children!(self.window)
+    }
+
+    async fn update(&mut self, message: Self::Message, sender: &ComponentSender<Self>) -> Result<bool> {
         // deal with custom messages
         match message {
-            MainMessage::Noop => false,
+            MainMessage::Noop => Ok(false),
             MainMessage::Close => {
                 // the root component output stops the application
                 sender.output(());
                 // need not to call `render`
-                false
+                Ok(false)
             }
         }
     }
 
-    fn render(&mut self, _sender: &ComponentSender<Self>) {
-        self.window.render();
+    fn render(&mut self, _sender: &ComponentSender<Self>) -> Result<()> {
+        let csize = self.window.client_size()?;
         // adjust layout and draw widgets here
+        Ok(())
+    }
+
+    fn render_children(&mut self) -> Result<()> {
+        self.window.render()
     }
 }
 ```

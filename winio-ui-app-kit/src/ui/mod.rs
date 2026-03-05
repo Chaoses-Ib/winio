@@ -43,17 +43,30 @@ pub use list_box::*;
 mod scroll_bar;
 pub use scroll_bar::*;
 
+mod scroll_view;
+pub use scroll_view::*;
+
 mod slider;
 pub use slider::*;
+
+#[cfg(feature = "media")]
+mod media;
+#[cfg(feature = "media")]
+pub use media::*;
+
+#[cfg(feature = "webview")]
+mod webview;
+#[cfg(feature = "webview")]
+pub use webview::*;
 
 mod accent;
 pub use accent::*;
 
-mod tooltip;
-pub use tooltip::*;
+mod tab_view;
+pub use tab_view::*;
 
-pub fn color_theme() -> ColorTheme {
-    unsafe {
+pub fn color_theme() -> crate::Result<ColorTheme> {
+    crate::catch(|| {
         let osx_mode =
             NSUserDefaults::standardUserDefaults().stringForKey(ns_string!("AppleInterfaceStyle"));
         let is_dark = osx_mode
@@ -64,7 +77,7 @@ pub fn color_theme() -> ColorTheme {
         } else {
             ColorTheme::Light
         }
-    }
+    })
 }
 
 #[inline]

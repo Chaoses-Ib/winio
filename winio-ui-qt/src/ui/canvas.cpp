@@ -7,9 +7,15 @@
 #include <QRadialGradient>
 
 WinioCanvas::WinioCanvas(QWidget *parent)
-    : QWidget(parent), m_paint_callback(std::nullopt),
-      m_move_callback(std::nullopt), m_press_callback(std::nullopt),
-      m_release_callback(std::nullopt), m_buffer() {
+    :
+#ifdef WINIO_UI_QT_OPENGL
+      QOpenGLWidget(parent),
+#else
+      QWidget(parent),
+#endif
+      m_paint_callback(std::nullopt), m_move_callback(std::nullopt),
+      m_press_callback(std::nullopt), m_release_callback(std::nullopt),
+      m_buffer() {
     setMouseTracking(true);
 }
 
@@ -107,7 +113,16 @@ void painter_draw_text(QPainter &p, QRectF rect, rust::Str text) {
     p.drawText(rect, QString::fromUtf8(text.data(), text.size()), option);
 }
 
-void color_transparent(QColor &c) { new (&c) QColor{Qt::transparent}; }
+void painter_set_transform(QPainter &p, WTransform const &t) {
+    p.setTransform(QTransform{t.m11, t.m12, t.m21, t.m22, t.m31, t.m32});
+}
+
+WTransform painter_get_transform(QPainter const &p) {
+    auto t = p.transform();
+    return WTransform{t.m11(), t.m12(), t.m21(), t.m22(), t.m31(), t.m32()};
+}
+
+void color_transparent(QColor &c) noexcept { new (&c) QColor{Qt::transparent}; }
 
 bool color_accent(QColor &c) {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)

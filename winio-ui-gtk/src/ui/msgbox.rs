@@ -4,6 +4,8 @@ use gtk4::glib::{GString, dgettext};
 use winio_handle::AsWindow;
 use winio_primitive::{MessageBoxButton, MessageBoxResponse, MessageBoxStyle};
 
+use crate::Result;
+
 struct PredefButtons {
     ok: GString,
     yes: GString,
@@ -37,7 +39,7 @@ async fn msgbox_custom(
     _style: MessageBoxStyle,
     btns: MessageBoxButton,
     cbtns: Vec<CustomButton>,
-) -> MessageBoxResponse {
+) -> Result<MessageBoxResponse> {
     let predef = &*PREDEF_BUTTONS;
     let mut buttons = Vec::<&str>::new();
     let mut results = vec![];
@@ -79,12 +81,13 @@ async fn msgbox_custom(
     let dialog = builder.build();
 
     let res = dialog
-        .choose_future(parent.map(|w| w.as_window().to_gtk()).as_ref())
+        .choose_future(parent.as_ref().map(|w| w.as_window().to_gtk()))
         .await
         .ok();
 
-    res.map(|res| results[res as usize])
-        .unwrap_or(MessageBoxResponse::Cancel)
+    Ok(res
+        .map(|res| results[res as usize])
+        .unwrap_or(MessageBoxResponse::Cancel))
 }
 
 #[derive(Debug, Clone)]
@@ -115,7 +118,7 @@ impl MessageBox {
         }
     }
 
-    pub async fn show(self, parent: Option<impl AsWindow>) -> MessageBoxResponse {
+    pub async fn show(self, parent: Option<impl AsWindow>) -> Result<MessageBoxResponse> {
         msgbox_custom(
             parent, self.msg, self.title, self.instr, self.style, self.btns, self.cbtns,
         )

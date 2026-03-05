@@ -2,9 +2,12 @@
 
 WinioMainWindow::WinioMainWindow(QWidget *parent)
     : QMainWindow(parent), m_resize_callback(std::nullopt),
-      m_move_callback(std::nullopt), m_close_callback(std::nullopt) {
+      m_move_callback(std::nullopt), m_close_callback(std::nullopt),
+      m_theme_callback(std::nullopt) {
     setWindowFlags(windowFlags() | Qt::WindowMinMaxButtonsHint);
 }
+
+WinioMainWindow::~WinioMainWindow() {}
 
 void WinioMainWindow::resizeEvent(QResizeEvent *event) {
     if (m_resize_callback) {
@@ -33,8 +36,19 @@ void WinioMainWindow::closeEvent(QCloseEvent *event) {
     event->accept();
 }
 
-std::unique_ptr<QMainWindow> new_main_window(QWidget *parent) {
-    return std::make_unique<WinioMainWindow>(parent);
+void WinioMainWindow::changeEvent(QEvent *event) {
+    auto type = event->type();
+    if (type == QEvent::ThemeChange || type == QEvent::PaletteChange ||
+        type == QEvent::StyleChange) {
+        if (m_theme_callback) {
+            auto &[callback, data] = *m_theme_callback;
+            callback(data);
+        }
+    }
+}
+
+std::unique_ptr<QMainWindow> new_main_window() {
+    return std::make_unique<WinioMainWindow>(nullptr);
 }
 
 void main_window_register_resize_event(QMainWindow &w,
@@ -55,5 +69,12 @@ void main_window_register_close_event(QMainWindow &w,
                                       callback_fn_t<bool()> callback,
                                       std::uint8_t const *data) {
     static_cast<WinioMainWindow &>(w).m_close_callback =
+        std::make_tuple(std::move(callback), data);
+}
+
+void main_window_register_theme_event(QMainWindow &w,
+                                      callback_fn_t<void()> callback,
+                                      std::uint8_t const *data) {
+    static_cast<WinioMainWindow &>(w).m_theme_callback =
         std::make_tuple(std::move(callback), data);
 }

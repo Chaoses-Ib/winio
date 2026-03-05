@@ -1,11 +1,10 @@
 use inherit_methods_macro::inherit_methods;
-use objc2::rc::Retained;
+use objc2::{MainThreadOnly, rc::Retained};
 use objc2_app_kit::NSProgressIndicator;
-use objc2_foundation::MainThreadMarker;
-use winio_handle::AsWindow;
+use winio_handle::AsContainer;
 use winio_primitive::{Point, Size};
 
-use crate::ui::Widget;
+use crate::{Result, catch, ui::Widget};
 
 #[derive(Debug)]
 pub struct Progress {
@@ -15,82 +14,82 @@ pub struct Progress {
 
 #[inherit_methods(from = "self.handle")]
 impl Progress {
-    pub fn new(parent: impl AsWindow) -> Self {
-        unsafe {
-            let mtm = MainThreadMarker::new().unwrap();
+    pub fn new(parent: impl AsContainer) -> Result<Self> {
+        let parent = parent.as_container();
+        let mtm = parent.as_app_kit().mtm();
 
+        catch(|| unsafe {
             let view = NSProgressIndicator::new(mtm);
             view.setIndeterminate(false);
             view.setUsesThreadedAnimation(false);
-            let handle = Widget::from_nsview(parent, Retained::cast_unchecked(view.clone()));
+            let handle = Widget::from_nsview(parent, Retained::cast_unchecked(view.clone()))?;
 
-            Self { handle, view }
-        }
+            Ok(Self { handle, view })
+        })
+        .flatten()
     }
 
-    pub fn is_visible(&self) -> bool;
+    pub fn is_visible(&self) -> Result<bool>;
 
-    pub fn set_visible(&mut self, v: bool);
+    pub fn set_visible(&mut self, v: bool) -> Result<()>;
 
-    pub fn is_enabled(&self) -> bool;
+    pub fn is_enabled(&self) -> Result<bool>;
 
-    pub fn set_enabled(&mut self, v: bool);
+    pub fn set_enabled(&mut self, v: bool) -> Result<()>;
 
-    pub fn preferred_size(&self) -> Size {
-        Size::new(0.0, 5.0)
+    pub fn preferred_size(&self) -> Result<Size> {
+        Ok(Size::new(0.0, 5.0))
     }
 
-    pub fn loc(&self) -> Point;
+    pub fn loc(&self) -> Result<Point>;
 
-    pub fn set_loc(&mut self, p: Point);
+    pub fn set_loc(&mut self, p: Point) -> Result<()>;
 
-    pub fn size(&self) -> Size;
+    pub fn size(&self) -> Result<Size>;
 
-    pub fn set_size(&mut self, v: Size);
+    pub fn set_size(&mut self, v: Size) -> Result<()>;
 
-    pub fn minimum(&self) -> usize {
-        unsafe { self.view.minValue() as _ }
+    pub fn tooltip(&self) -> Result<String>;
+
+    pub fn set_tooltip(&mut self, s: impl AsRef<str>) -> Result<()>;
+
+    pub fn minimum(&self) -> Result<usize> {
+        catch(|| self.view.minValue() as _)
     }
 
-    pub fn set_minimum(&mut self, v: usize) {
-        unsafe {
-            self.view.setMinValue(v as _);
-        }
+    pub fn set_minimum(&mut self, v: usize) -> Result<()> {
+        catch(|| self.view.setMinValue(v as _))
     }
 
-    pub fn maximum(&self) -> usize {
-        unsafe { self.view.maxValue() as _ }
+    pub fn maximum(&self) -> Result<usize> {
+        catch(|| self.view.maxValue() as _)
     }
 
-    pub fn set_maximum(&mut self, v: usize) {
-        unsafe {
-            self.view.setMaxValue(v as _);
-        }
+    pub fn set_maximum(&mut self, v: usize) -> Result<()> {
+        catch(|| self.view.setMaxValue(v as _))
     }
 
-    pub fn pos(&self) -> usize {
-        unsafe { self.view.doubleValue() as _ }
+    pub fn pos(&self) -> Result<usize> {
+        catch(|| self.view.doubleValue() as _)
     }
 
-    pub fn set_pos(&mut self, pos: usize) {
-        unsafe {
-            self.view.setDoubleValue(pos as _);
-        }
+    pub fn set_pos(&mut self, pos: usize) -> Result<()> {
+        catch(|| self.view.setDoubleValue(pos as _))
     }
 
-    pub fn is_indeterminate(&self) -> bool {
-        unsafe { self.view.isIndeterminate() }
+    pub fn is_indeterminate(&self) -> Result<bool> {
+        catch(|| self.view.isIndeterminate())
     }
 
-    pub fn set_indeterminate(&mut self, v: bool) {
-        unsafe {
+    pub fn set_indeterminate(&mut self, v: bool) -> Result<()> {
+        catch(|| unsafe {
             self.view.setIndeterminate(v);
             if v {
                 self.view.startAnimation(None);
             } else {
                 self.view.stopAnimation(None);
             }
-        }
+        })
     }
 }
 

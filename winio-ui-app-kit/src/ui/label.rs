@@ -1,11 +1,10 @@
 use inherit_methods_macro::inherit_methods;
-use objc2::rc::Retained;
+use objc2::{MainThreadOnly, rc::Retained};
 use objc2_app_kit::{NSTextAlignment, NSTextField};
-use objc2_foundation::{MainThreadMarker, NSString};
-use winio_handle::AsWindow;
+use winio_handle::AsContainer;
 use winio_primitive::{HAlign, Point, Size};
 
-use crate::ui::{Widget, from_nsstring};
+use crate::{Result, catch, ui::Widget};
 
 #[derive(Debug)]
 pub struct Label {
@@ -15,69 +14,71 @@ pub struct Label {
 
 #[inherit_methods(from = "self.handle")]
 impl Label {
-    pub fn new(parent: impl AsWindow) -> Self {
-        unsafe {
-            let mtm = MainThreadMarker::new().unwrap();
+    pub fn new(parent: impl AsContainer) -> Result<Self> {
+        let parent = parent.as_container();
 
-            let view = NSTextField::new(mtm);
+        catch(|| unsafe {
+            let view = NSTextField::new(parent.as_app_kit().mtm());
             view.setBezeled(false);
             view.setDrawsBackground(false);
             view.setEditable(false);
             view.setSelectable(false);
-            let handle = Widget::from_nsview(parent, Retained::cast_unchecked(view.clone()));
+            let handle = Widget::from_nsview(parent, Retained::cast_unchecked(view.clone()))?;
 
-            Self { handle, view }
-        }
+            Ok(Self { handle, view })
+        })
+        .flatten()
     }
 
-    pub fn is_visible(&self) -> bool;
+    pub fn is_visible(&self) -> Result<bool>;
 
-    pub fn set_visible(&mut self, v: bool);
+    pub fn set_visible(&mut self, v: bool) -> Result<()>;
 
-    pub fn is_enabled(&self) -> bool;
+    pub fn is_enabled(&self) -> Result<bool>;
 
-    pub fn set_enabled(&mut self, v: bool);
+    pub fn set_enabled(&mut self, v: bool) -> Result<()>;
 
-    pub fn preferred_size(&self) -> Size;
-
-    pub fn loc(&self) -> Point;
-
-    pub fn set_loc(&mut self, p: Point);
-
-    pub fn size(&self) -> Size;
-
-    pub fn set_size(&mut self, v: Size);
-
-    pub fn text(&self) -> String {
-        unsafe { from_nsstring(&self.view.stringValue()) }
+    pub fn preferred_size(&self) -> Result<Size> {
+        let mut size = self.handle.preferred_size()?;
+        size.width += 8.0;
+        Ok(size)
     }
 
-    pub fn set_text(&mut self, s: impl AsRef<str>) {
-        unsafe {
-            self.view.setStringValue(&NSString::from_str(s.as_ref()));
-        }
-    }
+    pub fn loc(&self) -> Result<Point>;
 
-    pub fn halign(&self) -> HAlign {
-        let align = unsafe { self.view.alignment() };
-        match align {
+    pub fn set_loc(&mut self, p: Point) -> Result<()>;
+
+    pub fn size(&self) -> Result<Size>;
+
+    pub fn set_size(&mut self, v: Size) -> Result<()>;
+
+    pub fn tooltip(&self) -> Result<String>;
+
+    pub fn set_tooltip(&mut self, s: impl AsRef<str>) -> Result<()>;
+
+    pub fn text(&self) -> Result<String>;
+
+    pub fn set_text(&mut self, s: impl AsRef<str>) -> Result<()>;
+
+    pub fn halign(&self) -> Result<HAlign> {
+        let align = catch(|| self.view.alignment())?;
+        let align = match align {
             NSTextAlignment::Right => HAlign::Right,
             NSTextAlignment::Center => HAlign::Center,
             NSTextAlignment::Justified => HAlign::Stretch,
             _ => HAlign::Left,
-        }
+        };
+        Ok(align)
     }
 
-    pub fn set_halign(&mut self, align: HAlign) {
-        unsafe {
-            let align = match align {
-                HAlign::Left => NSTextAlignment::Left,
-                HAlign::Center => NSTextAlignment::Center,
-                HAlign::Right => NSTextAlignment::Right,
-                HAlign::Stretch => NSTextAlignment::Justified,
-            };
-            self.view.setAlignment(align);
-        }
+    pub fn set_halign(&mut self, align: HAlign) -> Result<()> {
+        let align = match align {
+            HAlign::Left => NSTextAlignment::Left,
+            HAlign::Center => NSTextAlignment::Center,
+            HAlign::Right => NSTextAlignment::Right,
+            HAlign::Stretch => NSTextAlignment::Justified,
+        };
+        catch(|| self.view.setAlignment(align))
     }
 }
 

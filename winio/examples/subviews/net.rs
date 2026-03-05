@@ -1,0 +1,183 @@
+use std::{ops::Deref, time::Duration};
+
+use compio::{runtime::spawn, time::timeout};
+use cyper::Client;
+use winio::prelude::*;
+
+use crate::{Error, Result};
+
+pub struct NetPage {
+    window: Child<TabViewItem>,
+    canvas: Child<Canvas>,
+    button: Child<Button>,
+    entry: Child<Edit>,
+    client: Client,
+    text: NetFetchStatus,
+}
+
+#[derive(Debug)]
+pub enum NetFetchStatus {
+    Loading,
+    Complete(String),
+    Error(String),
+    Timedout,
+}
+
+#[derive(Debug)]
+pub enum NetPageEvent {}
+
+#[derive(Debug)]
+pub enum NetPageMessage {
+    Noop,
+    Go,
+    Fetch(NetFetchStatus),
+}
+
+impl Component for NetPage {
+    type Error = Error;
+    type Event = NetPageEvent;
+    type Init<'a> = ();
+    type Message = NetPageMessage;
+
+    async fn init(_init: Self::Init<'_>, sender: &ComponentSender<Self>) -> Result<Self> {
+        let url = "https://www.example.com/";
+        init! {
+            window: TabViewItem = (()) => {
+                text: "Networking",
+            },
+            canvas: Canvas = (&window),
+            button: Button = (&window) => {
+                text: "Go",
+            },
+            entry: Edit = (&window) => {
+                text: url,
+            },
+        }
+
+        let client = Client::new();
+
+        let url = url.to_string();
+        spawn(fetch(client.clone(), url, sender.clone())).detach();
+
+        Ok(Self {
+            window,
+            canvas,
+            button,
+            entry,
+            text: NetFetchStatus::Loading,
+            client,
+        })
+    }
+
+    async fn start(&mut self, sender: &ComponentSender<Self>) -> ! {
+        start! {
+            sender, default: NetPageMessage::Noop,
+            self.button => {
+                ButtonEvent::Click => NetPageMessage::Go,
+            },
+            self.entry => {},
+        }
+    }
+
+    async fn update_children(&mut self) -> Result<bool> {
+        update_children!(self.window, self.canvas, self.entry, self.button)
+    }
+
+    async fn update(
+        &mut self,
+        message: Self::Message,
+        sender: &ComponentSender<Self>,
+    ) -> Result<bool> {
+        match message {
+            NetPageMessage::Noop => Ok(false),
+            NetPageMessage::Go => {
+                spawn(fetch(
+                    self.client.clone(),
+                    self.entry.text()?,
+                    sender.clone(),
+                ))
+                .detach();
+                Ok(false)
+            }
+            NetPageMessage::Fetch(status) => {
+                self.text = status;
+                Ok(true)
+            }
+        }
+    }
+
+    fn render(&mut self, _sender: &ComponentSender<Self>) -> Result<()> {
+        let csize = self.window.size()?;
+
+        {
+            let mut header_panel = layout! {
+                StackPanel::new(Orient::Horizontal),
+                self.entry => { grow: true },
+                self.button
+            };
+            let mut root_panel = layout! {
+                StackPanel::new(Orient::Vertical),
+                header_panel,
+                self.canvas => { grow: true },
+            };
+            root_panel.set_size(csize)?;
+        }
+
+        let mut ctx = self.canvas.context()?;
+        let is_dark = ColorTheme::current()? == ColorTheme::Dark;
+        let brush = SolidColorBrush::new(if is_dark {
+            Color::new(255, 255, 255, 255)
+        } else {
+            Color::new(0, 0, 0, 255)
+        });
+        ctx.draw_str(
+            &brush,
+            DrawingFontBuilder::new()
+                .halign(HAlign::Left)
+                .valign(VAlign::Top)
+                .family("Courier New")
+                .size(12.0)
+                .build(),
+            Point::zero(),
+            match &self.text {
+                NetFetchStatus::Loading => "Loading...",
+                NetFetchStatus::Complete(s) => s.as_str(),
+                NetFetchStatus::Error(e) => e.as_str(),
+                NetFetchStatus::Timedout => "Timed out.",
+            },
+        )?;
+        Ok(())
+    }
+}
+
+impl Deref for NetPage {
+    type Target = TabViewItem;
+
+    fn deref(&self) -> &Self::Target {
+        &self.window
+    }
+}
+
+async fn fetch_impl(client: Client, url: String) -> Result<NetFetchStatus, NetFetchStatus> {
+    let req = client
+        .get(url)
+        .map_err(|e| NetFetchStatus::Error(e.to_string()))?;
+    let res = timeout(Duration::from_secs(8), req.send())
+        .await
+        .map_err(|_| NetFetchStatus::Timedout)?
+        .map_err(|e| NetFetchStatus::Error(e.to_string()))?;
+    let s = res
+        .text()
+        .await
+        .map_err(|e| NetFetchStatus::Error(e.to_string()))?;
+    Ok(NetFetchStatus::Complete(s))
+}
+
+async fn fetch(client: Client, url: String, sender: ComponentSender<NetPage>) {
+    sender.post(NetPageMessage::Fetch(NetFetchStatus::Loading));
+    let status = match fetch_impl(client.clone(), url.clone()).await {
+        Ok(s) => s,
+        Err(e) => e,
+    };
+    sender.post(NetPageMessage::Fetch(status));
+}

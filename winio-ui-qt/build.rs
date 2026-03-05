@@ -6,13 +6,28 @@ fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS");
 
     if target_os.as_deref() != Ok("windows") && target_os.as_deref() != Ok("macos") {
-        let qbuild =
-            qt_build_utils::QtBuild::new(vec!["Core".into(), "Gui".into(), "Widgets".into()])
-                .unwrap();
+        let mut modules = vec![
+            "Core".into(),
+            "Gui".into(),
+            "Widgets".into(),
+            #[cfg(feature = "media")]
+            "Multimedia".into(),
+            #[cfg(feature = "media")]
+            "MultimediaWidgets".into(),
+            #[cfg(feature = "webview")]
+            "WebEngineCore".into(),
+            #[cfg(feature = "webview")]
+            "WebEngineWidgets".into(),
+        ];
+        let mut qbuild = qt_build_utils::QtBuild::new(modules.clone()).unwrap();
 
         let major = qbuild.version().major;
         if major != 5 && major != 6 {
             panic!("Unsupported Qt version: {major}");
+        }
+        if major == 6 && cfg!(feature = "opengl") {
+            modules.push("OpenGLWidgets".into());
+            qbuild = qt_build_utils::QtBuild::new(modules).unwrap();
         }
         println!("cargo::rustc-check-cfg=cfg(qtver, values(\"5\", \"6\"))");
         println!("cargo::rustc-cfg=qtver=\"{major}\"");
@@ -33,6 +48,12 @@ fn main() {
             "src/ui/combo_box",
             "src/ui/list_box",
             "src/ui/scroll_bar",
+            "src/ui/scroll_view",
+            "src/ui/tab_view",
+            #[cfg(feature = "media")]
+            "src/ui/media",
+            #[cfg(feature = "webview")]
+            "src/ui/webview",
         ];
 
         for s in sources {
@@ -54,6 +75,9 @@ fn main() {
             }))
             .includes(inc)
             .cpp(true);
+        if cfg!(feature = "opengl") {
+            build.define("WINIO_UI_QT_OPENGL", None);
+        }
         qbuild.cargo_link_libraries(&mut build);
         build.compile("winio");
     }

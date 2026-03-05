@@ -1,37 +1,68 @@
-use std::{
-    fmt::Debug,
-    ops::{Deref, DerefMut},
-};
+use std::{cell::RefCell, collections::BTreeMap};
 
 use widestring::U16CString;
-use windows_sys::Win32::UI::{
-    Controls::{
-        TOOLTIPS_CLASSW, TTDT_AUTOPOP, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_DELTOOLW,
-        TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP, TTS_NOPREFIX,
-        TTTOOLINFOW,
+use windows_sys::Win32::{
+    Foundation::HWND,
+    UI::{
+        Controls::{
+            TOOLTIPS_CLASSW, TTDT_AUTOPOP, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_DELTOOLW,
+            TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
+        },
+        WindowsAndMessaging::{GetParent, GetSystemMetrics, SM_CXMAXTRACK, WS_POPUP},
     },
-    WindowsAndMessaging::{DestroyWindow, GetParent, GetSystemMetrics, SM_CXMAXTRACK, WS_POPUP},
 };
-use winio_handle::{AsRawWidget, AsWidget};
 
-use crate::{Widget, ui::fix_crlf};
+use crate::{Result, Widget, ui::fix_crlf};
 
-pub struct ToolTip<T: AsWidget> {
-    inner: T,
+thread_local! {
+    static TOOLTIPS: RefCell<BTreeMap<HWND, ToolTip>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+pub(crate) fn set_tooltip(hwnd: HWND, s: impl AsRef<str>) -> Result<()> {
+    let s = s.as_ref();
+    if s.is_empty() {
+        remove_tooltip(hwnd);
+        Ok(())
+    } else {
+        TOOLTIPS.with_borrow_mut(|m| {
+            match m.get_mut(&hwnd) {
+                Some(t) => {
+                    t.set_tooltip(s);
+                }
+                None => {
+                    let mut t = ToolTip::new(hwnd)?;
+                    t.set_tooltip(s);
+                    m.insert(hwnd, t);
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+pub(crate) fn get_tooltip(hwnd: HWND) -> Option<String> {
+    TOOLTIPS.with_borrow(|m| m.get(&hwnd).map(|t| t.tooltip()))
+}
+
+pub(crate) fn remove_tooltip(hwnd: HWND) {
+    TOOLTIPS.with_borrow_mut(|m| m.remove(&hwnd));
+}
+
+pub(crate) struct ToolTip {
     handle: Widget,
     info: TTTOOLINFOW,
     text: U16CString,
 }
 
-impl<T: AsWidget> ToolTip<T> {
-    pub fn new(inner: T) -> Self {
-        let parent = unsafe { GetParent(inner.as_widget().as_win32()) };
+impl ToolTip {
+    pub fn new(hwnd: HWND) -> Result<Self> {
+        let parent = unsafe { GetParent(hwnd) };
         let handle = Widget::new(
             TOOLTIPS_CLASSW,
             WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
             0,
             parent,
-        );
+        )?;
 
         // Enable support for multiline tooltips
         // -1 doesn't work, we use SM_CXMAXTRACK like WinForms does
@@ -45,12 +76,12 @@ impl<T: AsWidget> ToolTip<T> {
         info.cbSize = std::mem::size_of::<TTTOOLINFOW>() as _;
         info.uFlags = TTF_SUBCLASS | TTF_IDISHWND;
         info.hwnd = parent;
-        Self {
-            inner,
+        info.uId = hwnd as _;
+        Ok(Self {
             handle,
             info,
             text: U16CString::new(),
-        }
+        })
     }
 
     pub fn tooltip(&self) -> String {
@@ -58,11 +89,8 @@ impl<T: AsWidget> ToolTip<T> {
     }
 
     fn update_info(&mut self, msg: u32) {
-        for handle in self.inner.iter_widgets() {
-            self.info.uId = handle.as_win32() as _;
-            self.handle
-                .send_message(msg, 0, std::ptr::addr_of!(self.info) as _);
-        }
+        self.handle
+            .send_message(msg, 0, std::ptr::addr_of!(self.info) as _);
     }
 
     pub fn set_tooltip(&mut self, s: impl AsRef<str>) {
@@ -86,34 +114,8 @@ impl<T: AsWidget> ToolTip<T> {
     }
 }
 
-impl<T: AsWidget> Drop for ToolTip<T> {
+impl Drop for ToolTip {
     fn drop(&mut self) {
-        unsafe {
-            DestroyWindow(self.handle.as_raw_widget().as_win32());
-        }
-    }
-}
-
-impl<T: AsWidget + Debug> Debug for ToolTip<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ToolTip")
-            .field("inner", &self.inner)
-            .field("handle", &self.handle)
-            .field("text", &self.text)
-            .finish()
-    }
-}
-
-impl<T: AsWidget> Deref for ToolTip<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<T: AsWidget> DerefMut for ToolTip<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+        self.delete();
     }
 }

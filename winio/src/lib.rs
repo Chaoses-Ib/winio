@@ -1,7 +1,7 @@
 //! A single-threaded asynchronous GUI runtime, based on [`compio`] and ELM
 //! design.
 
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 
 #[doc(no_inline)]
@@ -17,33 +17,33 @@ pub use winio_primitive as primitive;
 
 cfg_if::cfg_if! {
     if #[cfg(windows)] {
-        #[cfg(any(
-            all(not(feature = "win32"), not(feature = "winui")),
-            all(feature = "win32", feature = "winui")
-        ))]
+        #[cfg(all(feature = "win32", feature = "winui"))]
         compile_error!("You must choose only one of these features: [\"win32\", \"winui\"]");
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "winui")] {
                 use winio_ui_winui as sys;
-            } else {
+            } else if #[cfg(feature = "win32")] {
                 use winio_ui_win32 as sys;
+            } else {
+                mod stub;
+                use stub as sys;
             }
         }
     } else if #[cfg(target_os = "macos")] {
         use winio_ui_app_kit as sys;
     } else {
-        #[cfg(any(
-            all(not(feature = "gtk"), not(feature = "qt")),
-            all(feature = "gtk", feature = "qt")
-        ))]
+        #[cfg(all(feature = "gtk", feature = "qt"))]
         compile_error!("You must choose only one of these features: [\"gtk\", \"qt\"]");
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "qt")] {
                 use winio_ui_qt as sys;
-            } else {
+            } else if #[cfg(feature = "gtk")] {
                 use winio_ui_gtk as sys;
+            } else {
+                mod stub;
+                use stub as sys;
             }
         }
     }
@@ -55,5 +55,7 @@ pub mod widgets;
 
 /// For blanket imports.
 pub mod prelude {
-    pub use crate::{elm::*, handle::*, layout::*, primitive::*, ui::*, widgets::*};
+    pub use crate::{Error, Result, elm::*, handle::*, layout::*, primitive::*, ui::*, widgets::*};
 }
+
+pub use sys::{Error, Result};

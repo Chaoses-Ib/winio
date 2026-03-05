@@ -1,11 +1,10 @@
 [package]
 name = "winio"
-version = "0.7.2"
+version = "0.10.0"
 description = "Single-threaded async GUI runtime based on compio."
 categories = ["asynchronous", "gui"]
 keywords = ["async", "gui"]
 edition = { workspace = true }
-authors = { workspace = true }
 readme = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
@@ -14,17 +13,20 @@ repository = { workspace = true }
 winio-primitive = { workspace = true }
 winio-layout = { workspace = true }
 winio-handle = { workspace = true }
-winio-elm = { workspace = true, features = ["handle", "layout"] }
+winio-elm = { workspace = true, features = ["handle", "primitive"] }
 
-compio = { workspace = true }
+compio = { workspace = true, public = true }
 compio-log = { workspace = true }
 
 cfg-if = { workspace = true }
 futures-util = { workspace = true }
 inherit-methods-macro = { workspace = true }
-image = { workspace = true, default-features = false }
+image = { workspace = true }
+plotters-backend = { version = "0.3", optional = true }
+thiserror = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
+winio-ui-windows-common = { workspace = true }
 winio-ui-win32 = { workspace = true, optional = true }
 winio-ui-winui = { workspace = true, optional = true }
 
@@ -35,33 +37,86 @@ winio-ui-app-kit = { workspace = true }
 winio-ui-gtk = { workspace = true, optional = true }
 winio-ui-qt = { workspace = true, optional = true }
 
+[build-dependencies]
+cfg_aliases = "0.2"
+
 [dev-dependencies]
-compio = { workspace = true, features = ["time", "rustls", "ring"] }
-cyper = { version = "0.4.0", default-features = false, features = [
+compio = { workspace = true, default-features = true, features = [
+    "time",
+    "rustls",
+    "ring",
+] }
+cyper = { version = "0.8.0", default-features = false, features = [
     "rustls",
     "http2",
     "http3-altsvc",
 ] }
+cyper-axum = "0.8.0"
+axum = { version = "0.8", default-features = false }
 
 dirs = "6.0"
 futures-util = { workspace = true }
-image = { workspace = true, default-features = false, features = [
-    "default-formats",
-] }
+image = { workspace = true, features = ["default-formats"] }
 itertools = "0.14"
+local-sync = { workspace = true }
+plotters = { version = "0.3", default-features = false, features = [
+    "line_series",
+] }
+pulldown-cmark = "0.13"
+send_wrapper = { workspace = true, features = ["futures"] }
 tracing-subscriber = "0.3"
+url = "2"
 
 [features]
-default = ["qt", "win32", "win32-dark-mode"]
+default = ["qt", "win32"]
 win32 = ["dep:winio-ui-win32"]
 winui = ["dep:winio-ui-winui"]
 gtk = ["dep:winio-ui-gtk"]
 qt = ["dep:winio-ui-qt"]
 enable_log = ["compio/enable_log", "compio-log/enable_log"]
 
-nightly = ["compio/nightly", "cyper/nightly"]
+media = [
+    "winio-ui-app-kit/media",
+    "winio-ui-win32?/media",
+    "winio-ui-winui?/media",
+    "winio-ui-gtk?/media",
+    "winio-ui-qt?/media",
+]
+webview = [
+    "winio-ui-app-kit/webview",
+    "winio-ui-win32?/webview",
+    "winio-ui-winui?/webview",
+    "winio-ui-gtk?/webview",
+    "winio-ui-qt?/webview",
+]
+plotters = ["dep:plotters-backend"]
+all = ["media", "webview", "plotters"]
+
+raw-window-handle = ["winio-handle/raw-window-handle"]
+
+gen_blocks = ["winio-elm/gen_blocks"]
+once_cell_try = [
+    "winio-ui-windows-common/once_cell_try",
+    "winio-ui-win32?/once_cell_try",
+    "winio-ui-winui?/once_cell_try",
+]
+nightly = [
+    "gen_blocks",
+    "once_cell_try",
+    "winio-elm/nightly",
+    "winio-ui-windows-common/nightly",
+    "winio-ui-win32?/nightly",
+    "winio-ui-winui?/nightly",
+    "compio/nightly",
+    "cyper/nightly",
+    "cyper-axum/nightly",
+]
+
 win32-dark-mode = [
     "winio-ui-win32?/dark-mode",
     "winio-ui-winui?/win32-dark-mode",
 ]
+winui-enable-cbs = ["winio-ui-winui?/enable-cbs"]
+winui-webview-system = ["winio-ui-winui?/webview-system"]
 objc-static = ["winio-ui-app-kit/objc-static"]
+qt-opengl = ["winio-ui-qt?/opengl"]

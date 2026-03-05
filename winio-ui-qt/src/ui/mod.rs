@@ -8,6 +8,7 @@ mod canvas;
 pub use canvas::*;
 
 mod widget;
+pub use widget::View;
 pub(crate) use widget::*;
 
 mod monitor;
@@ -40,10 +41,24 @@ pub use list_box::*;
 mod scroll_bar;
 pub use scroll_bar::*;
 
-mod tooltip;
-pub use tooltip::*;
+mod scroll_view;
+pub use scroll_view::*;
 
-pub(crate) trait StaticCastTo<T> {
+#[cfg(feature = "media")]
+mod media;
+#[cfg(feature = "media")]
+pub use media::*;
+
+#[cfg(feature = "webview")]
+mod webview;
+#[cfg(feature = "webview")]
+pub use webview::*;
+
+mod tab_view;
+pub use tab_view::*;
+
+#[doc(hidden)]
+pub trait StaticCastTo<T> {
     fn static_cast(&self) -> &T;
     fn static_cast_mut(self: Pin<&mut Self>) -> Pin<&mut T>;
 }
@@ -107,10 +122,10 @@ use std::pin::Pin;
 
 use winio_primitive::ColorTheme;
 
-pub fn color_theme() -> ColorTheme {
-    if is_dark() {
-        ColorTheme::Dark
+pub fn color_theme() -> crate::Result<ColorTheme> {
+    if is_dark()? {
+        Ok(ColorTheme::Dark)
     } else {
-        ColorTheme::Light
+        Ok(ColorTheme::Light)
     }
 }

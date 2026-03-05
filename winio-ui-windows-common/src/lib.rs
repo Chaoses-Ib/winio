@@ -1,20 +1,10 @@
 //! Windows common methods for winio.
 
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(feature = "once_cell_try", feature(once_cell_try))]
 #![cfg(windows)]
 
-use windows_sys::Win32::Foundation::HWND;
-use winio_handle::{AsRawWindow, AsWindow, RawWindow};
-
-pub(crate) fn parent_handle(parent: Option<impl AsWindow>) -> Option<HWND> {
-    parent.and_then(|parent| match parent.as_window().as_raw_window() {
-        #[cfg(feature = "win32")]
-        RawWindow::Win32(h) => Some(h),
-        #[cfg(feature = "winui")]
-        RawWindow::WinUI(window) => Some(window.AppWindow().ok()?.Id().ok()?.Value as _),
-        _ => unimplemented!(),
-    })
-}
+pub use windows::core::{Error, Result};
 
 mod accent;
 pub use accent::*;
@@ -36,3 +26,9 @@ pub use darkmode::*;
 
 mod resource;
 pub use resource::*;
+
+mod backdrop;
+pub use backdrop::*;
+
+mod runtime;
+pub use runtime::*;

@@ -1,12 +1,13 @@
 use std::cell::Cell;
 
 use winio_primitive::ColorTheme;
+
 thread_local! {
-    pub(crate) static COLOR_THEME: Cell<ColorTheme> = const { Cell::new(ColorTheme::Light) };
+    pub(crate) static COLOR_THEME: Cell<Option<ColorTheme>> = const { Cell::new(None) };
 }
 
-pub fn color_theme() -> ColorTheme {
-    COLOR_THEME.get()
+pub fn color_theme() -> crate::Result<ColorTheme> {
+    COLOR_THEME.get().ok_or(crate::Error::NoColorTheme)
 }
 
 mod window;
@@ -39,6 +40,9 @@ pub use text_box::*;
 mod label;
 pub use label::*;
 
+mod link_label;
+pub use link_label::*;
+
 mod progress;
 pub use progress::*;
 
@@ -54,11 +58,24 @@ pub use check_box::*;
 mod scroll_bar;
 pub use scroll_bar::*;
 
+mod scroll_view;
+pub use scroll_view::*;
+
 mod slider;
 pub use slider::*;
+
+#[cfg(feature = "media")]
+mod media;
+#[cfg(feature = "media")]
+pub use media::*;
+
+#[cfg(feature = "webview")]
+mod webview;
+#[cfg(feature = "webview")]
+pub use webview::*;
 
 mod accent;
 pub use accent::*;
 
-mod tooltip;
-pub use tooltip::*;
+mod tab_view;
+pub use tab_view::*;

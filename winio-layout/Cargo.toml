@@ -1,9 +1,8 @@
 [package]
 name = "winio-layout"
-version = "0.1.0"
+version = "0.2.0"
 description = "Layouts for winio."
 edition = { workspace = true }
-authors = { workspace = true }
 readme = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
@@ -12,4 +11,5 @@ repository = { workspace = true }
 winio-primitive = { workspace = true }
 
 paste = { workspace = true }
-taffy = "0.8"
+taffy = "0.9"
+thiserror = { workspace = true }

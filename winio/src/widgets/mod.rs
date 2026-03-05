@@ -17,6 +17,9 @@ fn approx_eq(f1: f64, f2: f64) -> bool {
 mod window;
 pub use window::*;
 
+mod view;
+pub use view::*;
+
 mod button;
 pub use button::*;
 
@@ -28,6 +31,9 @@ pub use text_box::*;
 
 mod label;
 pub use label::*;
+
+mod link_label;
+pub use link_label::*;
 
 mod canvas;
 pub use canvas::*;
@@ -50,8 +56,21 @@ pub use radio_button::*;
 mod scroll_bar;
 pub use scroll_bar::*;
 
+mod scroll_view;
+pub use scroll_view::*;
+
 mod slider;
 pub use slider::*;
 
-mod tooltip;
-pub use tooltip::*;
+#[cfg(feature = "media")]
+mod media;
+#[cfg(feature = "media")]
+pub use media::*;
+
+#[cfg(feature = "webview")]
+mod webview;
+#[cfg(feature = "webview")]
+pub use webview::*;
+
+mod tab_view;
+pub use tab_view::*;

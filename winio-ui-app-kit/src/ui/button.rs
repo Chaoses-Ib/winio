@@ -1,3 +1,4 @@
+use compio_log::{error, info, warn};
 use inherit_methods_macro::inherit_methods;
 use objc2::{
     DeclaredClass, MainThreadOnly, define_class, msg_send,
@@ -6,14 +7,15 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSBezelStyle, NSButton, NSButtonType, NSControlStateValueOff, NSControlStateValueOn,
+    NSWorkspace,
 };
-use objc2_foundation::{MainThreadMarker, NSObject, NSString};
+use objc2_foundation::{MainThreadMarker, NSObject, NSString, NSURL};
 use winio_callback::Callback;
-use winio_handle::AsWindow;
+use winio_handle::AsContainer;
 use winio_primitive::{Point, Size};
 
 use crate::{
-    GlobalRuntime,
+    GlobalRuntime, Result, catch,
     ui::{Widget, from_nsstring},
 };
 
@@ -26,52 +28,56 @@ pub struct Button {
 
 #[inherit_methods(from = "self.handle")]
 impl Button {
-    pub fn new(parent: impl AsWindow) -> Self {
-        unsafe {
-            let mtm = MainThreadMarker::new().unwrap();
+    pub fn new(parent: impl AsContainer) -> Result<Self> {
+        let parent = parent.as_container();
+        let mtm = parent.as_app_kit().mtm();
 
+        catch(|| unsafe {
             let view = NSButton::new(mtm);
-            let handle = Widget::from_nsview(parent, Retained::cast_unchecked(view.clone()));
+            let handle = Widget::from_nsview(parent, Retained::cast_unchecked(view.clone()))?;
 
             let delegate = ButtonDelegate::new(mtm);
             view.setTarget(Some(&delegate));
             view.setAction(Some(sel!(onAction)));
 
             view.setBezelStyle(NSBezelStyle::FlexiblePush);
-            Self {
+            Ok(Self {
                 handle,
                 view,
                 delegate,
-            }
-        }
+            })
+        })
+        .flatten()
     }
 
-    pub fn is_visible(&self) -> bool;
+    pub fn is_visible(&self) -> Result<bool>;
 
-    pub fn set_visible(&mut self, v: bool);
+    pub fn set_visible(&mut self, v: bool) -> Result<()>;
 
-    pub fn is_enabled(&self) -> bool;
+    pub fn is_enabled(&self) -> Result<bool>;
 
-    pub fn set_enabled(&mut self, v: bool);
+    pub fn set_enabled(&mut self, v: bool) -> Result<()>;
 
-    pub fn preferred_size(&self) -> Size;
+    pub fn preferred_size(&self) -> Result<Size>;
 
-    pub fn loc(&self) -> Point;
+    pub fn loc(&self) -> Result<Point>;
 
-    pub fn set_loc(&mut self, p: Point);
+    pub fn set_loc(&mut self, p: Point) -> Result<()>;
 
-    pub fn size(&self) -> Size;
+    pub fn size(&self) -> Result<Size>;
 
-    pub fn set_size(&mut self, v: Size);
+    pub fn set_size(&mut self, v: Size) -> Result<()>;
 
-    pub fn text(&self) -> String {
-        unsafe { from_nsstring(&self.view.title()) }
+    pub fn tooltip(&self) -> Result<String>;
+
+    pub fn set_tooltip(&mut self, s: impl AsRef<str>) -> Result<()>;
+
+    pub fn text(&self) -> Result<String> {
+        catch(|| from_nsstring(&self.view.title()))
     }
 
-    pub fn set_text(&mut self, s: impl AsRef<str>) {
-        unsafe {
-            self.view.setTitle(&NSString::from_str(s.as_ref()));
-        }
+    pub fn set_text(&mut self, s: impl AsRef<str>) -> Result<()> {
+        catch(|| self.view.setTitle(&NSString::from_str(s.as_ref())))
     }
 
     pub async fn wait_click(&self) {
@@ -88,49 +94,57 @@ pub struct CheckBox {
 
 #[inherit_methods(from = "self.handle")]
 impl CheckBox {
-    pub fn new(parent: impl AsWindow) -> Self {
-        let handle = Button::new(parent);
-        unsafe {
+    pub fn new(parent: impl AsContainer) -> Result<Self> {
+        let handle = Button::new(parent)?;
+        catch(|| {
             handle.view.setButtonType(NSButtonType::Switch);
             handle.view.setAllowsMixedState(false);
-        }
-        Self { handle }
+        })?;
+        Ok(Self { handle })
     }
 
-    pub fn is_visible(&self) -> bool;
+    pub fn is_visible(&self) -> Result<bool>;
 
-    pub fn set_visible(&mut self, v: bool);
+    pub fn set_visible(&mut self, v: bool) -> Result<()>;
 
-    pub fn is_enabled(&self) -> bool;
+    pub fn is_enabled(&self) -> Result<bool>;
 
-    pub fn set_enabled(&mut self, v: bool);
+    pub fn set_enabled(&mut self, v: bool) -> Result<()>;
 
-    pub fn preferred_size(&self) -> Size;
-
-    pub fn loc(&self) -> Point;
-
-    pub fn set_loc(&mut self, p: Point);
-
-    pub fn size(&self) -> Size;
-
-    pub fn set_size(&mut self, v: Size);
-
-    pub fn text(&self) -> String;
-
-    pub fn set_text(&mut self, s: impl AsRef<str>);
-
-    pub fn is_checked(&self) -> bool {
-        unsafe { self.handle.view.state() == NSControlStateValueOn }
+    pub fn preferred_size(&self) -> Result<Size> {
+        let mut s = self.handle.preferred_size()?;
+        s.width += 4.0;
+        Ok(s)
     }
 
-    pub fn set_checked(&mut self, v: bool) {
-        unsafe {
+    pub fn loc(&self) -> Result<Point>;
+
+    pub fn set_loc(&mut self, p: Point) -> Result<()>;
+
+    pub fn size(&self) -> Result<Size>;
+
+    pub fn set_size(&mut self, v: Size) -> Result<()>;
+
+    pub fn tooltip(&self) -> Result<String>;
+
+    pub fn set_tooltip(&mut self, s: impl AsRef<str>) -> Result<()>;
+
+    pub fn text(&self) -> Result<String>;
+
+    pub fn set_text(&mut self, s: impl AsRef<str>) -> Result<()>;
+
+    pub fn is_checked(&self) -> Result<bool> {
+        catch(|| self.handle.view.state() == NSControlStateValueOn)
+    }
+
+    pub fn set_checked(&mut self, v: bool) -> Result<()> {
+        catch(|| {
             self.handle.view.setState(if v {
                 NSControlStateValueOn
             } else {
                 NSControlStateValueOff
             })
-        }
+        })
     }
 
     pub async fn wait_click(&self) {
@@ -147,49 +161,53 @@ pub struct RadioButton {
 
 #[inherit_methods(from = "self.handle")]
 impl RadioButton {
-    pub fn new(parent: impl AsWindow) -> Self {
-        let handle = Button::new(parent);
-        unsafe {
+    pub fn new(parent: impl AsContainer) -> Result<Self> {
+        let handle = Button::new(parent)?;
+        catch(|| {
             handle.view.setButtonType(NSButtonType::Radio);
             handle.view.setAllowsMixedState(false);
-        }
-        Self { handle }
+        })?;
+        Ok(Self { handle })
     }
 
-    pub fn is_visible(&self) -> bool;
+    pub fn is_visible(&self) -> Result<bool>;
 
-    pub fn set_visible(&mut self, v: bool);
+    pub fn set_visible(&mut self, v: bool) -> Result<()>;
 
-    pub fn is_enabled(&self) -> bool;
+    pub fn is_enabled(&self) -> Result<bool>;
 
-    pub fn set_enabled(&mut self, v: bool);
+    pub fn set_enabled(&mut self, v: bool) -> Result<()>;
 
-    pub fn preferred_size(&self) -> Size;
+    pub fn preferred_size(&self) -> Result<Size>;
 
-    pub fn loc(&self) -> Point;
+    pub fn loc(&self) -> Result<Point>;
 
-    pub fn set_loc(&mut self, p: Point);
+    pub fn set_loc(&mut self, p: Point) -> Result<()>;
 
-    pub fn size(&self) -> Size;
+    pub fn size(&self) -> Result<Size>;
 
-    pub fn set_size(&mut self, v: Size);
+    pub fn set_size(&mut self, v: Size) -> Result<()>;
 
-    pub fn text(&self) -> String;
+    pub fn tooltip(&self) -> Result<String>;
 
-    pub fn set_text(&mut self, s: impl AsRef<str>);
+    pub fn set_tooltip(&mut self, s: impl AsRef<str>) -> Result<()>;
 
-    pub fn is_checked(&self) -> bool {
-        unsafe { self.handle.view.state() == NSControlStateValueOn }
+    pub fn text(&self) -> Result<String>;
+
+    pub fn set_text(&mut self, s: impl AsRef<str>) -> Result<()>;
+
+    pub fn is_checked(&self) -> Result<bool> {
+        catch(|| self.handle.view.state() == NSControlStateValueOn)
     }
 
-    pub fn set_checked(&mut self, v: bool) {
-        unsafe {
+    pub fn set_checked(&mut self, v: bool) -> Result<()> {
+        catch(|| {
             self.handle.view.setState(if v {
                 NSControlStateValueOn
             } else {
                 NSControlStateValueOff
             })
-        }
+        })
     }
 
     pub async fn wait_click(&self) {
@@ -198,6 +216,83 @@ impl RadioButton {
 }
 
 winio_handle::impl_as_widget!(RadioButton, handle);
+
+#[derive(Debug)]
+pub struct LinkLabel {
+    handle: Button,
+    uri: String,
+}
+
+#[inherit_methods(from = "self.handle")]
+impl LinkLabel {
+    pub fn new(parent: impl AsContainer) -> Result<Self> {
+        let handle = Button::new(parent)?;
+        catch(|| {
+            handle.view.setBordered(false);
+            handle.view.setBezelStyle(NSBezelStyle::Badge);
+        })?;
+        Ok(Self {
+            handle,
+            uri: String::new(),
+        })
+    }
+
+    pub fn is_visible(&self) -> Result<bool>;
+
+    pub fn set_visible(&mut self, v: bool) -> Result<()>;
+
+    pub fn is_enabled(&self) -> Result<bool>;
+
+    pub fn set_enabled(&mut self, v: bool) -> Result<()>;
+
+    pub fn preferred_size(&self) -> Result<Size>;
+
+    pub fn loc(&self) -> Result<Point>;
+
+    pub fn set_loc(&mut self, p: Point) -> Result<()>;
+
+    pub fn size(&self) -> Result<Size>;
+
+    pub fn set_size(&mut self, v: Size) -> Result<()>;
+
+    pub fn tooltip(&self) -> Result<String>;
+
+    pub fn set_tooltip(&mut self, s: impl AsRef<str>) -> Result<()>;
+
+    pub fn text(&self) -> Result<String>;
+
+    pub fn set_text(&mut self, s: impl AsRef<str>) -> Result<()>;
+
+    pub fn uri(&self) -> Result<String> {
+        Ok(self.uri.clone())
+    }
+
+    pub fn set_uri(&mut self, uri: impl AsRef<str>) -> Result<()> {
+        self.uri = uri.as_ref().to_string();
+        Ok(())
+    }
+
+    pub async fn wait_click(&self) {
+        loop {
+            self.handle.wait_click().await;
+            if self.uri.is_empty() {
+                break;
+            } else {
+                if let Some(url) = NSURL::URLWithString(&NSString::from_str(&self.uri)) {
+                    info!("Opening link: {}", self.uri);
+                    let opened = NSWorkspace::sharedWorkspace().openURL(&url);
+                    if !opened {
+                        error!("Failed to open link: {}", self.uri);
+                    }
+                } else {
+                    warn!("Invalid URL: {}", self.uri);
+                }
+            }
+        }
+    }
+}
+
+winio_handle::impl_as_widget!(LinkLabel, handle);
 
 #[derive(Debug, Default)]
 struct ButtonDelegateIvars {

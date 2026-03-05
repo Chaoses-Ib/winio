@@ -3,21 +3,18 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-#[cfg(feature = "layout")]
+#[cfg(feature = "primitive")]
 use inherit_methods_macro::inherit_methods;
 use smallvec::SmallVec;
 #[cfg(feature = "handle")]
 use winio_handle::{
-    AsRawWidget, AsRawWindow, AsWidget, AsWindow, BorrowedWidget, BorrowedWindow, RawWidget,
-    RawWindow,
+    AsContainer, AsWidget, AsWindow, BorrowedContainer, BorrowedWidget, BorrowedWindow,
 };
-#[cfg(feature = "layout")]
-use winio_layout::Layoutable;
-#[cfg(feature = "layout")]
-use winio_primitive::{Point, Rect, Size};
+#[cfg(feature = "primitive")]
+use winio_primitive::{Failable, Layoutable, Point, Rect, Size};
 
 use super::ComponentMessage;
-use crate::{Component, ComponentSender};
+use crate::{BoxComponent, Component, ComponentSender, Root};
 
 /// Helper to embed one component into another. It handles different types of
 /// messages and events.
@@ -29,9 +26,13 @@ pub struct Child<T: Component> {
 
 impl<T: Component> Child<T> {
     /// Create and initialize the child component.
-    pub fn init<'a>(init: impl Into<T::Init<'a>>) -> Self {
+    pub async fn init<'a>(init: impl Into<T::Init<'a>>) -> Result<Self, T::Error> {
         let sender = ComponentSender::new();
-        let model = T::init(init.into(), &sender);
+        let model = T::init(init.into(), &sender).await?;
+        Ok(Self::new(model, sender))
+    }
+
+    pub(crate) fn new(model: T, sender: ComponentSender<T>) -> Self {
         Self {
             model,
             sender,
@@ -51,7 +52,7 @@ impl<T: Component> Child<T> {
     /// ```
     /// In the `MainModel::start`, you should write
     /// ```ignore
-    /// async fn start(&mut self, sender: &ComponentSender<Self>) {
+    /// async fn start(&mut self, sender: &ComponentSender<Self>) -> ! {
     ///     start! {
     ///         sender, default: MainMessage::Noop,
     ///         self.window => {
@@ -63,7 +64,7 @@ impl<T: Component> Child<T> {
     /// ```
     /// It is equivalent to
     /// ```ignore
-    /// async fn start(&mut self, sender: &ComponentSender<Self>) {
+    /// async fn start(&mut self, sender: &ComponentSender<Self>) -> ! {
     ///     let fut_window = self.window.start(
     ///         sender,
     ///         |e| match e {
@@ -106,23 +107,57 @@ impl<T: Component> Child<T> {
         futures_util::future::join(fut_start, fut_forward).await.0
     }
 
+    /// Post message to the child component.
+    pub fn post(&mut self, message: T::Message) {
+        self.sender.post(message);
+    }
+
     /// Emit message to the child component.
-    pub async fn emit(&mut self, message: T::Message) -> bool {
+    pub async fn emit(&mut self, message: T::Message) -> Result<bool, T::Error> {
         self.model.update(message, &self.sender).await
     }
 
     /// Respond to the child message.
-    pub async fn update(&mut self) -> bool {
-        let mut need_render = false;
+    pub async fn update(&mut self) -> Result<bool, T::Error> {
+        let mut need_render = self.model.update_children().await?;
         for message in self.msg_cache.drain(..) {
-            need_render |= self.model.update(message, &self.sender).await;
+            need_render |= self.model.update(message, &self.sender).await?;
         }
-        need_render
+        Ok(need_render)
     }
 
     /// Render the child component.
-    pub fn render(&mut self) {
-        self.model.render(&self.sender);
+    pub fn render(&mut self) -> Result<(), T::Error> {
+        self.model.render(&self.sender)?;
+        self.model.render_children()
+    }
+
+    /// Get the sender of the child component.
+    pub fn sender(&self) -> &ComponentSender<T> {
+        &self.sender
+    }
+
+    /// Try to convert the child component into a root component.
+    ///
+    /// It clears the inner message cache and updates the child component if
+    /// needed.
+    pub async fn try_into_root(mut self) -> Result<Root<T>, T::Error> {
+        if self.update().await? {
+            self.render()?;
+        }
+        Ok(Root::new(self.model, self.sender))
+    }
+}
+
+impl<T: Component + 'static> Child<T> {
+    /// Box the component.
+    pub fn into_boxed(self) -> Child<BoxComponent<T::Message, T::Event, T::Error>> {
+        let sender = ComponentSender(self.sender.0);
+        Child {
+            model: BoxComponent::new(self.model),
+            sender,
+            msg_cache: self.msg_cache,
+        }
     }
 }
 
@@ -141,23 +176,9 @@ impl<T: Component> DerefMut for Child<T> {
 }
 
 #[cfg(feature = "handle")]
-impl<T: AsRawWindow + Component> AsRawWindow for Child<T> {
-    fn as_raw_window(&self) -> RawWindow {
-        self.model.as_raw_window()
-    }
-}
-
-#[cfg(feature = "handle")]
 impl<T: AsWindow + Component> AsWindow for Child<T> {
     fn as_window(&self) -> BorrowedWindow<'_> {
         self.model.as_window()
-    }
-}
-
-#[cfg(feature = "handle")]
-impl<T: AsRawWidget + Component> AsRawWidget for Child<T> {
-    fn as_raw_widget(&self) -> RawWidget {
-        self.model.as_raw_widget()
     }
 }
 
@@ -168,28 +189,40 @@ impl<T: AsWidget + Component> AsWidget for Child<T> {
     }
 }
 
+#[cfg(feature = "handle")]
+impl<T: AsContainer + Component> AsContainer for Child<T> {
+    fn as_container(&self) -> BorrowedContainer<'_> {
+        self.model.as_container()
+    }
+}
+
 impl<T: Component + Debug> Debug for Child<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Child").field("model", &self.model).finish()
     }
 }
 
-#[cfg(feature = "layout")]
+#[cfg(feature = "primitive")]
+impl<T: Component + Failable> Failable for Child<T> {
+    type Error = <T as Failable>::Error;
+}
+
+#[cfg(feature = "primitive")]
 #[inherit_methods(from = "self.model")]
 impl<T: Component + Layoutable> Layoutable for Child<T> {
-    fn loc(&self) -> Point;
+    fn loc(&self) -> Result<Point, Self::Error>;
 
-    fn set_loc(&mut self, p: Point);
+    fn set_loc(&mut self, p: Point) -> Result<(), Self::Error>;
 
-    fn size(&self) -> Size;
+    fn size(&self) -> Result<Size, Self::Error>;
 
-    fn set_size(&mut self, s: Size);
+    fn set_size(&mut self, s: Size) -> Result<(), Self::Error>;
 
-    fn rect(&self) -> Rect;
+    fn rect(&self) -> Result<Rect, Self::Error>;
 
-    fn set_rect(&mut self, r: Rect);
+    fn set_rect(&mut self, r: Rect) -> Result<(), Self::Error>;
 
-    fn preferred_size(&self) -> Size;
+    fn preferred_size(&self) -> Result<Size, Self::Error>;
 
-    fn min_size(&self) -> Size;
+    fn min_size(&self) -> Result<Size, Self::Error>;
 }
